@@ -7,18 +7,25 @@
   - 链接/vid 批量下载（视频 + 音频）
   - 歌名搜索（自动搜糖豆站内链接，搜不到引导粘贴 App 分享链接）
   - 相关视频批量下载（同歌其他版本，可仅下舞曲 mp3）
+  - 多任务并发下载、断点续传、失败重试
+  - 设置持久化（QSettings）、深色模式、自动更新检查
 后台线程下载，界面不卡顿；任务表 + 进度条 + 日志。
 
 运行：python tangdou_gui.py
 依赖：pip install PySide6  (音频提取还需 ffmpeg 或 pip install imageio-ffmpeg)
 """
+import concurrent.futures
+import json
 import os
 import sys
+import threading
+import webbrowser
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tangdou_dl as td  # 复用命令行版的下载逻辑
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QSettings, Signal, Slot
 from PySide6.QtGui import QFont, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
@@ -27,6 +34,9 @@ from PySide6.QtWidgets import (
     QListWidget, QAbstractItemView, QMessageBox, QGroupBox, QSplitter,
     QMenu, QHeaderView,
 )
+
+VERSION = "1.1.0"
+REPO = "hepengzhi/tangdou-downloader"
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
 K_VIDEO, K_MP3 = "video", "mp3"
@@ -39,7 +49,7 @@ STATUS_COLORS = {
     STATUS_FAIL: QColor("#eb5757"),
 }
 
-STYLE = """
+STYLE_LIGHT = """
 QMainWindow, QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 10pt; }
 QGroupBox {
     border: 1px solid #d9dee5; border-radius: 8px; margin-top: 10px;
@@ -59,16 +69,18 @@ QPushButton#primary:hover { background: #1f6fd9; border-color: #1f6fd9; color: #
 QPushButton#primary:disabled { background: #a9c6f0; border-color: #a9c6f0; color: #ffffff; }
 QPushButton#danger { color: #eb5757; }
 QPushButton#danger:hover { border-color: #eb5757; background: #fdf1f1; }
+QPushButton#flat { border: none; background: transparent; color: #4b5563; padding: 4px 8px; }
+QPushButton#flat:hover { background: #eef2f7; color: #2f80ed; }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {
     border: 1px solid #d0d7e2; border-radius: 6px; padding: 4px 8px; background: #ffffff;
-    selection-background-color: #2f80ed;
+    selection-background-color: #2f80ed; color: #1f2937;
 }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus {
     border-color: #2f80ed;
 }
 QTableWidget {
     border: 1px solid #d0d7e2; border-radius: 6px; background: #ffffff;
-    gridline-color: #eef1f5;
+    gridline-color: #eef1f5; color: #1f2937;
 }
 QTableWidget::item { padding: 4px; }
 QHeaderView::section {
@@ -88,8 +100,85 @@ QTabBar::tab {
 QTabBar::tab:selected { background: #ffffff; color: #2f80ed; font-weight: bold; border-bottom-color: #ffffff; }
 QTabBar::tab:hover { color: #2f80ed; }
 QStatusBar { background: #f2f5f9; color: #4b5563; }
-QPlainTextEdit#log { font-family: Consolas, monospace; font-size: 9pt; background: #ffffff; }
+QPlainTextEdit#log { font-family: Consolas, monospace; font-size: 9pt; background: #ffffff; color: #1f2937; }
+QLabel { color: #1f2937; }
+QMenu { background: #ffffff; border: 1px solid #d9dee5; border-radius: 6px; color: #1f2937; }
+QMenu::item:selected { background: #e8f1fd; color: #2f80ed; }
 """
+
+STYLE_DARK = """
+QMainWindow, QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 10pt; }
+QMainWindow, QDialog, QMessageBox { background: #1e2228; }
+QGroupBox {
+    border: 1px solid #333a44; border-radius: 8px; margin-top: 10px;
+    background: #242a32; font-weight: bold;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #aeb7c3; }
+QPushButton {
+    background: #2a313b; border: 1px solid #3a434f; border-radius: 6px;
+    padding: 5px 14px; color: #d5dbe3;
+}
+QPushButton:hover { background: #323c49; border-color: #5b9cf5; color: #5b9cf5; }
+QPushButton:disabled { color: #5a636e; background: #262c34; border-color: #2f363f; }
+QPushButton#primary {
+    background: #2f80ed; border: 1px solid #2f80ed; color: #ffffff; font-weight: bold;
+}
+QPushButton#primary:hover { background: #4a93f0; border-color: #4a93f0; color: #ffffff; }
+QPushButton#primary:disabled { background: #3a5a85; border-color: #3a5a85; color: #9db4d4; }
+QPushButton#danger { color: #ef6a6a; }
+QPushButton#danger:hover { border-color: #ef6a6a; background: #3a2a2e; }
+QPushButton#flat { border: none; background: transparent; color: #aeb7c3; padding: 4px 8px; }
+QPushButton#flat:hover { background: #2c333d; color: #5b9cf5; }
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {
+    border: 1px solid #3a434f; border-radius: 6px; padding: 4px 8px; background: #1b1f25;
+    selection-background-color: #2f80ed; color: #d5dbe3;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus {
+    border-color: #5b9cf5;
+}
+QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button { background: #2a313b; }
+QTableWidget {
+    border: 1px solid #3a434f; border-radius: 6px; background: #1b1f25;
+    gridline-color: #2b323b; color: #d5dbe3;
+}
+QTableWidget::item { padding: 4px; }
+QHeaderView::section {
+    background: #242a32; border: none; border-bottom: 1px solid #3a434f;
+    padding: 6px 8px; color: #aeb7c3; font-weight: bold;
+}
+QProgressBar {
+    border: none; border-radius: 5px; background: #2b323b; height: 12px; text-align: center;
+    font-size: 8pt; color: #d5dbe3;
+}
+QProgressBar::chunk { border-radius: 5px; background: #5b9cf5; }
+QTabWidget::pane { border: 1px solid #3a434f; border-radius: 8px; background: #1e2228; top: -1px; }
+QTabBar::tab {
+    background: #242a32; border: 1px solid #3a434f; padding: 7px 18px; margin-right: 2px;
+    border-top-left-radius: 6px; border-top-right-radius: 6px; color: #8a93a0;
+}
+QTabBar::tab:selected { background: #1e2228; color: #5b9cf5; font-weight: bold; border-bottom-color: #1e2228; }
+QTabBar::tab:hover { color: #5b9cf5; }
+QStatusBar { background: #242a32; color: #aeb7c3; }
+QPlainTextEdit#log { font-family: Consolas, monospace; font-size: 9pt; background: #16191e; color: #c9d1da; }
+QLabel { color: #d5dbe3; }
+QMenu { background: #242a32; border: 1px solid #3a434f; border-radius: 6px; color: #d5dbe3; }
+QMenu::item:selected { background: #2f3a48; color: #5b9cf5; }
+QToolTip { background: #242a32; color: #d5dbe3; border: 1px solid #3a434f; }
+"""
+
+
+def version_key(tag):
+    """'v1.2.3' -> (1, 2, 3) 用于版本比较。"""
+    nums = []
+    for part in tag.lstrip("vV").split("."):
+        d = ""
+        for ch in part:
+            if ch.isdigit():
+                d += ch
+            else:
+                break
+        nums.append(int(d) if d else 0)
+    return tuple(nums)
 
 
 class SearchWorker(QThread):
@@ -110,74 +199,114 @@ class SearchWorker(QThread):
         self.search_done.emit(results)
 
 
+class UpdateChecker(QThread):
+    """GitHub Release 自动更新检查。"""
+    found = Signal(str, str, str)       # tag, download_url, body
+
+    def __init__(self, repo, current, parent=None):
+        super().__init__(parent)
+        self.repo = repo
+        self.current = current
+
+    def run(self):
+        try:
+            url = f"https://api.github.com/repos/{self.repo}/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "tangdou-downloader"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                j = json.loads(resp.read().decode("utf-8"))
+            tag = j.get("tag_name") or ""
+            if tag and version_key(tag) > version_key(self.current):
+                assets = j.get("assets") or []
+                dl = assets[0]["browser_download_url"] if assets else (j.get("html_url") or "")
+                self.found.emit(tag, dl, (j.get("body") or "")[:500])
+        except Exception:
+            pass  # 网络失败/无新版：静默
+
+
 class DownloadWorker(QThread):
-    """下载任务队列线程。tasks: [(kind, key, title)]，kind ∈ {video, mp3}。"""
+    """下载任务队列线程（多任务并发）。tasks: [(kind, key, title)]。"""
     task_started = Signal(str, str)         # key, title
     task_progress = Signal(str, int, int)   # key, done, total
     task_done = Signal(str, bool, str, str)  # key, ok, mp4, mp3
     log = Signal(str)
     all_done = Signal()
 
-    def __init__(self, tasks, outdir, want_audio, quality, parent=None):
+    def __init__(self, tasks, outdir, want_audio, quality, workers=2, parent=None):
         super().__init__(parent)
         self.tasks = tasks
         self.outdir = outdir
         self.want_audio = want_audio
         self.quality = quality
+        self.workers = max(1, min(workers, 4))
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+        self.requestInterruption()
+
+    def _progress(self, key, done, total):
+        if self._stop.is_set() or self.isInterruptionRequested():
+            raise KeyboardInterrupt
+        self.task_progress.emit(key, done, total)
+
+    def _do_task(self, kind, key, title):
+        if self._stop.is_set():
+            return
+        self.task_started.emit(key, title)
+        try:
+            if kind == K_VIDEO:
+                ok, mp4, mp3 = td.download_video(
+                    key, self.outdir,
+                    want_audio=self.want_audio,
+                    quality=self.quality,
+                    log=self.log.emit,
+                    progress=lambda d, t: self._progress(key, d, t),
+                )
+            else:
+                fname = td.sanitize(title.replace("🎵 ", ""))
+                dest = os.path.join(self.outdir, fname + ".mp3")
+                self.log.emit(f"    下载舞曲 mp3 -> {os.path.basename(dest)}")
+                ok = td.download(key, dest, log=self.log.emit,
+                                 progress=lambda d, t: self._progress(key, d, t))
+                mp4, mp3 = ("", dest) if ok else ("", "")
+        except KeyboardInterrupt:
+            return
+        except Exception as e:
+            self.log.emit(f"    ! 任务异常: {e}")
+            ok, mp4, mp3 = False, "", ""
+        self.task_done.emit(key, ok, mp4 or "", mp3 or "")
 
     def run(self):
         ok_count = 0
-        for kind, key, title in self.tasks:
-            if self.isInterruptionRequested():
-                break
-            self._cur_key = key
-            self.task_started.emit(key, title)
-            try:
-                if kind == K_VIDEO:
-                    ok, mp4, mp3 = td.download_video(
-                        key, self.outdir,
-                        want_audio=self.want_audio,
-                        quality=self.quality,
-                        log=self.log.emit,
-                        progress=self._progress,
-                    )
-                else:
-                    fname = td.sanitize(title.replace("🎵 ", ""))
-                    dest = os.path.join(self.outdir, fname + ".mp3")
-                    self.log.emit(f"    下载舞曲 mp3 -> {os.path.basename(dest)}")
-                    ok = td.download(key, dest, log=self.log.emit, progress=self._progress)
-                    mp4, mp3 = ("", dest) if ok else ("", "")
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                self.log.emit(f"    ! 任务异常: {e}")
-                ok, mp4, mp3 = False, "", ""
-            if ok:
-                ok_count += 1
-            self.task_done.emit(key, ok, mp4, mp3)
-        self.log.emit(f"全部结束：成功 {ok_count} / {len(self.tasks)} 个任务。")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as ex:
+            futures = [ex.submit(self._do_task, *t) for t in self.tasks]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    f.result()
+                except Exception as e:
+                    self.log.emit(f"    ! 线程异常: {e}")
+        self.log.emit(f"全部结束：共 {len(self.tasks)} 个任务。")
         self.all_done.emit()
-
-    def _progress(self, done, total):
-        if self.isInterruptionRequested():
-            raise KeyboardInterrupt
-        self.task_progress.emit(getattr(self, "_cur_key", ""), done, total)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("糖豆广场舞下载器")
+        self.setWindowTitle(f"糖豆广场舞下载器 v{VERSION}")
         self.resize(980, 760)
         self.setMinimumSize(760, 560)
-        self._current_key = None   # 正在下载的任务 key（供进度回调关联）
         self._worker = None
         self._search_worker = None
+        self._update_worker = None
         self._row_of_key = {}
+        self._ok_count = 0
+        self.settings = QSettings("TangdouDownloader", "TangdouDownloader")
 
         self._build_ui()
+        self._load_settings()
         self._update_task_count()
         self.statusBar().showMessage("就绪")
+        self._check_update()
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -201,10 +330,16 @@ class MainWindow(QMainWindow):
         self.check_audio = QCheckBox("提取音频 (mp3)")
         self.check_audio.setChecked(True)
         cfg.addWidget(self.check_audio)
+        cfg.addWidget(QLabel("并发:"))
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, 4)
+        self.spin_workers.setValue(2)
+        self.spin_workers.setToolTip("同时下载的任务数（糖豆 CDN 限流，建议 1-3）")
+        cfg.addWidget(self.spin_workers)
         cfg.addSpacing(10)
         cfg.addWidget(QLabel("保存到:"))
         self.edit_dir = QLineEdit(td.default_download_dir())
-        self.edit_dir.setMinimumWidth(260)
+        self.edit_dir.setMinimumWidth(240)
         cfg.addWidget(self.edit_dir, 1)
         btn_dir = QPushButton("浏览…")
         btn_dir.clicked.connect(self._pick_dir)
@@ -213,6 +348,12 @@ class MainWindow(QMainWindow):
         btn_open.setObjectName("primary")
         btn_open.clicked.connect(self.open_dir)
         cfg.addWidget(btn_open)
+        self.btn_theme = QPushButton("🌙")
+        self.btn_theme.setObjectName("flat")
+        self.btn_theme.setToolTip("切换深色/浅色主题")
+        self.btn_theme.setFixedWidth(36)
+        self.btn_theme.clicked.connect(self.toggle_theme)
+        cfg.addWidget(self.btn_theme)
         root.addWidget(cfg_grp)
 
         # ---- 页签 ----
@@ -256,11 +397,13 @@ class MainWindow(QMainWindow):
         self.btn_stop.setObjectName("danger")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_download)
+        btn_retry = QPushButton("重试失败")
+        btn_retry.clicked.connect(self.retry_failed)
         btn_del = QPushButton("删除选中")
         btn_del.clicked.connect(self.delete_selected_tasks)
         btn_clear = QPushButton("清空完成项")
         btn_clear.clicked.connect(self.clear_done)
-        for b in (self.btn_start, self.btn_stop, btn_del, btn_clear):
+        for b in (self.btn_start, self.btn_stop, btn_retry, btn_del, btn_clear):
             row_btns.addWidget(b)
         row_btns.addStretch(1)
         v.addLayout(row_btns)
@@ -287,7 +430,6 @@ class MainWindow(QMainWindow):
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
-        self.setStyleSheet(STYLE)
 
     def _tab_links(self):
         w = QWidget()
@@ -386,6 +528,58 @@ class MainWindow(QMainWindow):
         v.addWidget(hint)
         v.addStretch(1)
         return w
+
+    # ---------------- 设置持久化 ----------------
+    def _load_settings(self):
+        s = self.settings
+        self.edit_dir.setText(s.value("save_dir", td.default_download_dir(), str))
+        self.combo_quality.setCurrentIndex(int(s.value("quality_idx", 0)))
+        self.check_audio.setChecked(s.value("audio", True, type=bool))
+        self.spin_workers.setValue(int(s.value("workers", 2)))
+        self._dark = s.value("dark_mode", "0") == "1"
+        geo = s.value("geometry", b"", bytes)
+        if geo:
+            self.restoreGeometry(geo)
+        self._apply_theme()
+
+    def _save_settings(self):
+        s = self.settings
+        s.setValue("save_dir", self.edit_dir.text())
+        s.setValue("quality_idx", self.combo_quality.currentIndex())
+        s.setValue("audio", self.check_audio.isChecked())
+        s.setValue("workers", self.spin_workers.value())
+        s.setValue("dark_mode", "1" if self._dark else "0")
+        s.setValue("geometry", self.saveGeometry())
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
+
+    def toggle_theme(self):
+        self._dark = not self._dark
+        self._apply_theme()
+
+    def _apply_theme(self):
+        self.setStyleSheet(STYLE_DARK if self._dark else STYLE_LIGHT)
+        self.btn_theme.setText("☀️" if self._dark else "🌙")
+
+    # ---------------- 自动更新 ----------------
+    def _check_update(self):
+        self._update_worker = UpdateChecker(REPO, VERSION, self)
+        self._update_worker.found.connect(self._on_update_found)
+        self._update_worker.start()
+
+    @Slot(str, str, str)
+    def _on_update_found(self, tag, url, body):
+        self.log(f"发现新版本 {tag}（当前 {VERSION}）")
+        box = QMessageBox(self)
+        box.setWindowTitle("发现新版本")
+        box.setText(f"检测到新版本 <b>{tag}</b>（当前 {VERSION}）\n\n{body[:200]}")
+        btn_dl = box.addButton("去下载", QMessageBox.AcceptRole)
+        box.addButton("稍后再说", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is btn_dl and url:
+            webbrowser.open(url)
 
     # ---------------- 工具方法 ----------------
     def log(self, text):
@@ -575,10 +769,12 @@ class MainWindow(QMainWindow):
             return
         outdir = self.edit_dir.text().strip() or "Download"
         os.makedirs(outdir, exist_ok=True)
+        self._ok_count = 0
         self._worker = DownloadWorker(
             tasks, outdir,
             want_audio=self.check_audio.isChecked(),
             quality=self.combo_quality.currentData(),
+            workers=self.spin_workers.value(),
             parent=self,
         )
         self._worker.task_started.connect(self._on_task_started)
@@ -589,18 +785,17 @@ class MainWindow(QMainWindow):
         self._worker.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.statusBar().showMessage(f"开始下载 {len(tasks)} 个任务…")
+        self.statusBar().showMessage(f"开始下载 {len(tasks)} 个任务（并发 {self.spin_workers.value()}）…")
 
     @Slot(str, str)
     def _on_task_started(self, key, title):
-        self._current_key = key
         r = self._row_of_key.get(key)
         if r is not None:
             self._set_row_status(r, STATUS_RUN, "准备中…", 0)
 
     @Slot(str, int, int)
     def _on_task_progress(self, key, done, total):
-        r = self._row_of_key.get(self._current_key)
+        r = self._row_of_key.get(key)
         if r is None:
             return
         bar = self.table.cellWidget(r, 2)
@@ -621,21 +816,40 @@ class MainWindow(QMainWindow):
             item = self.table.item(r, 1)
             item.setData(Qt.UserRole + 2, mp4)
             item.setData(Qt.UserRole + 3, mp3)
+            if ok:
+                self._ok_count += 1
 
     @Slot()
     def _on_all_done(self):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.statusBar().showMessage("全部任务结束")
-        self._current_key = None
+        done = self.table.rowCount() - self._fail_count()
+        self.statusBar().showMessage(f"全部任务结束：成功 {self._ok_count} / {done} 个")
+
+    def _fail_count(self):
+        n = 0
+        for r in range(self.table.rowCount()):
+            if self.table.item(r, 0).text() == STATUS_FAIL:
+                n += 1
+        return n
 
     @Slot()
     def stop_download(self):
         if self._worker and self._worker.isRunning():
-            self._worker.requestInterruption()
+            self._worker.stop()
             self.btn_stop.setEnabled(False)
-            self.log("正在停止（当前文件下完即停）…")
+            self.log("正在停止（已开始的下载会尽快中止，已下载部分保留可续传）…")
             self.statusBar().showMessage("停止中…")
+
+    @Slot()
+    def retry_failed(self):
+        """把失败/等待/下载中（已停止）的任务重置为等待，重新可下载。"""
+        changed = 0
+        for r in range(self.table.rowCount()):
+            if self.table.item(r, 0).text() in (STATUS_FAIL, STATUS_RUN, STATUS_WAIT):
+                self._set_row_status(r, STATUS_WAIT, "等待", 0)
+                changed += 1
+        self.statusBar().showMessage(f"已重置 {changed} 个任务，可重新开始下载" if changed else "没有可重试的任务")
 
     @Slot()
     def open_dir(self):

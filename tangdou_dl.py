@@ -148,34 +148,49 @@ def get_video_url_html(vid):
     return m.group(1) if m else None
 
 
-def download(url, dest, timeout=60, retries=3, log=print, progress=None):
-    """带 Referer 与重试的文件下载，返回是否成功。
-    log: 日志回调(msg)；progress: 进度回调(done_bytes, total_bytes)。"""
+def download(url, dest, timeout=60, retries=3, log=print, progress=None, resume=True):
+    """带 Referer、重试与断点续传的文件下载，返回是否成功。
+    resume: 支持断点续传（写入 dest+".part"，成功后改名）。"""
+    part = dest + ".part"
     for attempt in range(1, retries + 1):
+        start = os.path.getsize(part) if resume and os.path.exists(part) else 0
+        mode = "ab" if start > 0 else "wb"
+        hdrs = dict(HEADERS_DL)
+        if start > 0:
+            hdrs["Range"] = f"bytes={start}-"
         try:
-            req = urllib.request.Request(url, headers=HEADERS_DL)
-            with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 total = int(resp.headers.get("Content-Length") or 0)
-                got = 0
-                last = time.time()
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    got += len(chunk)
-                    if progress:
-                        progress(got, total)
-                    now = time.time()
-                    if now - last > 2:
-                        last = now
-                        mb = got / 1048576
-                        if total:
-                            log(f"    已下载 {mb:.1f} / {total/1048576:.1f} MB")
-                        else:
-                            log(f"    已下载 {mb:.1f} MB")
-            if total and got < total * 0.9:
-                raise IOError(f"下载不完整: {got}/{total}")
+                code = getattr(resp, "status", 200)
+                if start > 0 and code == 200:
+                    # 服务器不支持 Range，从头下
+                    start = 0
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    mode = "wb"
+                got = start
+                with open(part, mode) as f:
+                    last = time.time()
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                        if progress:
+                            progress(got, total + start if start else total)
+                        now = time.time()
+                        if now - last > 2:
+                            last = now
+                            mb = got / 1048576
+                            if total:
+                                log(f"    已下载 {mb:.1f} / {(total + start)/1048576:.1f} MB")
+                            else:
+                                log(f"    已下载 {mb:.1f} MB")
+            expect = total + start if start else total
+            if expect and got < expect * 0.9:
+                raise IOError(f"下载不完整: {got}/{expect}")
+            os.replace(part, dest)  # 完成：.part 改名
             return True
         except Exception as e:
             log(f"    下载失败(第{attempt}次): {e}")
