@@ -1,4 +1,4 @@
-﻿# 糖豆广场舞下载器 (Tangdou Downloader)
+# 糖豆广场舞下载器 (Tangdou Downloader)
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
 [![GUI](https://img.shields.io/badge/GUI-PySide6-green)](https://pypi.org/project/PySide6/)
@@ -76,6 +76,9 @@ pip install imageio-ffmpeg
 ## 快速开始
 
 ### 图形界面（推荐）
+
+**免安装 exe**：发布版提供单文件 `TangdouDownloader.exe`（约 75MB，已内置 PySide6 与 ffmpeg），双击即可运行，无需安装 Python 或任何依赖。首次启动需解压（5-15 秒）；如被 Windows Defender 误报，添加信任即可。重新打包：`pip install pyinstaller` 后执行
+`pyinstaller --onefile --windowed --collect-all imageio_ffmpeg tangdou_gui.py`。
 
 ```bash
 python tangdou_gui.py
