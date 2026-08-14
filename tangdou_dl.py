@@ -269,17 +269,46 @@ def _pick_quality_url(play_url, quality):
     return play_url
 
 
+def get_video_info_share(vid):
+    """备用信息接口：api-h5.tangdou.com/sample/share/main（老分享接口）。
+    会员(VIP)视频用主接口会报"请登录APP观看会员视频"，此接口仍能拿到标题和播放地址。"""
+    url = f"http://api-h5.tangdou.com/sample/share/main?vid={vid}"
+    j = http_get_json(url)
+    if j.get("code") != 0 or not j.get("data"):
+        raise RuntimeError(f"备用接口获取视频信息失败: {j.get('msg') or j}")
+    data = j["data"]
+    # 统一字段：老接口的播放地址在 video_url
+    if not data.get("play_url") and data.get("video_url"):
+        data["play_url"] = data["video_url"]
+    return data
+
+
 def download_video(vid, outdir, want_audio=True, quality="auto", log=print, progress=None, clip=None):
     """下载单个视频 + 提取音频。返回 (ok, mp4路径, mp3路径)。
     quality: auto(优先720P) / h720p / h540p / all(全部清晰度)
     clip: "开始-结束"（如 00:01:30-00:02:30），下载后剪辑出片段。"""
-    info = get_video_info(vid)
+    info = None
+    try:
+        info = get_video_info(vid)
+    except RuntimeError as e:
+        log(f"    主接口失败({e})，尝试备用通道…")
+        try:
+            info = get_video_info_share(vid)
+        except RuntimeError:
+            log("    备用接口也失败，尝试 HTML 解析…")
+            html_url = get_video_url_html(vid)
+            if html_url:
+                info = {"title": f"video_{vid}", "play_url": html_url}
+    if not info or not info.get("play_url"):
+        log("    ! 所有通道均无法获取视频地址")
+        return False, None, None
+
     title = sanitize(info.get("title") or vid)
     log(f"\n[{vid}] {title}")
 
     play_url = info.get("play_url")
     if not play_url:
-        log("    主接口未返回播放地址，尝试 HTML 解析兜底…")
+        log("    未返回播放地址，尝试 HTML 解析兜底…")
         play_url = get_video_url_html(vid)
         if not play_url:
             log("    ! 未能获取视频地址")
