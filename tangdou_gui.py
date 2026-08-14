@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_search)
         v.addLayout(row)
 
-        v.addWidget(QLabel("搜索结果（可多选后加入任务）："))
+        v.addWidget(QLabel("搜索结果（🎬 糖豆站内 = 可自动下载；🔗 全网 = 参考链接）："))
         self.list_results = QListWidget()
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         v.addWidget(self.list_results, 1)
@@ -322,26 +322,46 @@ class MainWindow(QMainWindow):
         self.btn_search.setEnabled(True)
         self.btn_search.setText("搜索")
         self.list_results.clear()
+        tangdou_n = sum(1 for r in results if r.get("vid"))
+        others_n = len(results) - tangdou_n
         if results:
-            for vid, title in results:
-                self.list_results.addItem(f"[{vid}] {title}")
-            self.statusBar().showMessage(f"自动搜索到 {len(results)} 个结果，可多选加入任务")
+            for r in results:
+                item = QListWidgetItem()
+                if r.get("vid"):
+                    item.setText(f"🎬 糖豆 [{r['vid']}] {r['title']}")
+                    item.setData(Qt.UserRole, r["vid"])
+                else:
+                    item.setText(f"🔗 全网: {r['title']}")
+                    item.setData(Qt.UserRole, None)
+                    item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+                    item.setToolTip(r.get("url") or "")
+                self.list_results.addItem(item)
+            msg = f"糖豆站内 {tangdou_n} 个（可下载）+ 全网参考 {others_n} 条"
+            self.statusBar().showMessage(msg)
+            self.log(f"搜索结果：糖豆 {tangdou_n} 条（自动下载），全网参考 {others_n} 条")
         else:
-            self.statusBar().showMessage("自动搜索无结果，请在 App 搜索后粘贴分享链接")
+            self.statusBar().showMessage("全网未搜到该歌名的广场舞视频，请在糖豆 App 搜索后粘贴分享链接")
+            self.log("未搜到结果。糖豆官网搜索已下线，请在糖豆 App 搜索歌名 → 分享 → 复制链接 → 粘贴到下方输入框。")
 
     @Slot()
     def add_selected_results(self):
         items = self.list_results.selectedItems()
         if not items:
-            QMessageBox.information(self, "提示", "请先在搜索结果里选择要下载的项")
+            QMessageBox.information(self, "提示", "请先在搜索结果里选择要下载的糖豆视频（🎬 项）")
             return
+        added = 0
         for it in items:
+            vid = it.data(Qt.UserRole)
+            if not vid:
+                continue
             text = it.text()
-            vid = td.extract_vid(text)
-            if vid:
-                title = text.split("] ", 1)[-1] if "] " in text else vid
-                self._add_row(vid, title, K_VIDEO)
-        self.statusBar().showMessage(f"已加入 {len(items)} 个任务")
+            title = text.split("] ", 1)[-1] if "] " in text else vid
+            self._add_row(vid, title, K_VIDEO)
+            added += 1
+        if added:
+            self.statusBar().showMessage(f"已加入 {added} 个糖豆下载任务")
+        else:
+            QMessageBox.information(self, "提示", "请选择 🎬 糖豆 开头的项（全网参考链接不支持自动下载）")
 
     @Slot()
     def add_related(self):
