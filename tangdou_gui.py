@@ -19,21 +19,82 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tangdou_dl as td  # 复用命令行版的下载逻辑
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPlainTextEdit, QLineEdit, QPushButton, QLabel, QComboBox, QCheckBox,
     QSpinBox, QFileDialog, QTableWidget, QTableWidgetItem, QProgressBar,
-    QListWidget, QAbstractItemView, QMessageBox, QGroupBox,
+    QListWidget, QAbstractItemView, QMessageBox, QGroupBox, QSplitter,
+    QMenu, QHeaderView,
 )
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
 K_VIDEO, K_MP3 = "video", "mp3"
 
+# 状态列配色
+STATUS_COLORS = {
+    STATUS_WAIT: QColor("#8a8f98"),
+    STATUS_RUN: QColor("#2f80ed"),
+    STATUS_OK: QColor("#27ae60"),
+    STATUS_FAIL: QColor("#eb5757"),
+}
+
+STYLE = """
+QMainWindow, QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 10pt; }
+QGroupBox {
+    border: 1px solid #d9dee5; border-radius: 8px; margin-top: 10px;
+    background: #fbfcfe; font-weight: bold;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #344054; }
+QPushButton {
+    background: #ffffff; border: 1px solid #c9d1db; border-radius: 6px;
+    padding: 5px 14px; color: #1f2937;
+}
+QPushButton:hover { background: #f2f6fc; border-color: #2f80ed; color: #2f80ed; }
+QPushButton:disabled { color: #b0b8c4; background: #f5f6f8; border-color: #e0e4ea; }
+QPushButton#primary {
+    background: #2f80ed; border: 1px solid #2f80ed; color: #ffffff; font-weight: bold;
+}
+QPushButton#primary:hover { background: #1f6fd9; border-color: #1f6fd9; color: #ffffff; }
+QPushButton#primary:disabled { background: #a9c6f0; border-color: #a9c6f0; color: #ffffff; }
+QPushButton#danger { color: #eb5757; }
+QPushButton#danger:hover { border-color: #eb5757; background: #fdf1f1; }
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {
+    border: 1px solid #d0d7e2; border-radius: 6px; padding: 4px 8px; background: #ffffff;
+    selection-background-color: #2f80ed;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus {
+    border-color: #2f80ed;
+}
+QTableWidget {
+    border: 1px solid #d0d7e2; border-radius: 6px; background: #ffffff;
+    gridline-color: #eef1f5;
+}
+QTableWidget::item { padding: 4px; }
+QHeaderView::section {
+    background: #f2f5f9; border: none; border-bottom: 1px solid #d0d7e2;
+    padding: 6px 8px; color: #344054; font-weight: bold;
+}
+QProgressBar {
+    border: none; border-radius: 5px; background: #e9eef5; height: 12px; text-align: center;
+    font-size: 8pt; color: #1f2937;
+}
+QProgressBar::chunk { border-radius: 5px; background: #2f80ed; }
+QTabWidget::pane { border: 1px solid #d9dee5; border-radius: 8px; background: #ffffff; top: -1px; }
+QTabBar::tab {
+    background: #f2f5f9; border: 1px solid #d9dee5; padding: 7px 18px; margin-right: 2px;
+    border-top-left-radius: 6px; border-top-right-radius: 6px; color: #4b5563;
+}
+QTabBar::tab:selected { background: #ffffff; color: #2f80ed; font-weight: bold; border-bottom-color: #ffffff; }
+QTabBar::tab:hover { color: #2f80ed; }
+QStatusBar { background: #f2f5f9; color: #4b5563; }
+QPlainTextEdit#log { font-family: Consolas, monospace; font-size: 9pt; background: #ffffff; }
+"""
+
 
 class SearchWorker(QThread):
     """歌名搜索线程。"""
-    search_done = Signal(list)          # [(vid, title)]
+    search_done = Signal(list)          # [{vid,title,url}]
     search_log = Signal(str)
 
     def __init__(self, keyword, parent=None):
@@ -107,98 +168,156 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("糖豆广场舞下载器")
-        self.resize(920, 700)
+        self.resize(980, 760)
+        self.setMinimumSize(760, 560)
         self._current_key = None   # 正在下载的任务 key（供进度回调关联）
         self._worker = None
         self._search_worker = None
         self._row_of_key = {}
 
         self._build_ui()
+        self._update_task_count()
         self.statusBar().showMessage("就绪")
 
     # ---------------- UI ----------------
     def _build_ui(self):
         central = QWidget(self)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(12, 12, 12, 8)
+        root.setSpacing(8)
 
-        cfg = QHBoxLayout()
+        # ---- 设置区 ----
+        cfg_grp = QGroupBox("下载设置")
+        cfg = QHBoxLayout(cfg_grp)
+        cfg.setContentsMargins(12, 14, 12, 10)
+        cfg.setSpacing(8)
         cfg.addWidget(QLabel("清晰度:"))
         self.combo_quality = QComboBox()
-        self.combo_quality.addItem("自动(优先720P)", "auto")
+        self.combo_quality.addItem("自动（优先 720P）", "auto")
         self.combo_quality.addItem("720P", "h720p")
         self.combo_quality.addItem("540P", "h540p")
         self.combo_quality.addItem("全部清晰度", "all")
         cfg.addWidget(self.combo_quality)
-        self.check_audio = QCheckBox("提取音频(mp3)")
+        self.check_audio = QCheckBox("提取音频 (mp3)")
         self.check_audio.setChecked(True)
         cfg.addWidget(self.check_audio)
-        cfg.addSpacing(12)
+        cfg.addSpacing(10)
         cfg.addWidget(QLabel("保存到:"))
         self.edit_dir = QLineEdit(td.default_download_dir())
+        self.edit_dir.setMinimumWidth(260)
         cfg.addWidget(self.edit_dir, 1)
         btn_dir = QPushButton("浏览…")
         btn_dir.clicked.connect(self._pick_dir)
         cfg.addWidget(btn_dir)
-        root.addLayout(cfg)
+        btn_open = QPushButton("打开目录")
+        btn_open.setObjectName("primary")
+        btn_open.clicked.connect(self.open_dir)
+        cfg.addWidget(btn_open)
+        root.addWidget(cfg_grp)
 
+        # ---- 页签 ----
         tabs = QTabWidget()
         tabs.addTab(self._tab_links(), "链接下载")
         tabs.addTab(self._tab_song(), "歌名搜索")
         tabs.addTab(self._tab_related(), "相关批量")
         root.addWidget(tabs)
 
-        grp = QGroupBox("任务列表")
+        # ---- 任务列表 + 日志（可拖拽分隔）----
+        splitter = QSplitter(Qt.Vertical)
+
+        grp = QGroupBox()
+        self.grp_tasks = grp
         v = QVBoxLayout(grp)
+        v.setContentsMargins(10, 14, 10, 10)
+        v.setSpacing(6)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["状态", "标题", "进度"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 70)
-        self.table.setColumnWidth(2, 200)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 76)
+        self.table.setColumnWidth(2, 190)
+        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_menu)
+        self.table.cellDoubleClicked.connect(self._on_table_double_click)
         v.addWidget(self.table)
+
         row_btns = QHBoxLayout()
-        btn_start = QPushButton("▶ 开始下载")
-        btn_start.clicked.connect(self.start_download)
-        btn_stop = QPushButton("■ 停止")
-        btn_stop.clicked.connect(self.stop_download)
-        btn_open = QPushButton("打开保存目录")
-        btn_open.clicked.connect(self.open_dir)
+        row_btns.setSpacing(8)
+        self.btn_start = QPushButton("▶ 开始下载")
+        self.btn_start.setObjectName("primary")
+        self.btn_start.clicked.connect(self.start_download)
+        self.btn_stop = QPushButton("■ 停止")
+        self.btn_stop.setObjectName("danger")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self.stop_download)
+        btn_del = QPushButton("删除选中")
+        btn_del.clicked.connect(self.delete_selected_tasks)
         btn_clear = QPushButton("清空完成项")
         btn_clear.clicked.connect(self.clear_done)
-        for b in (btn_start, btn_stop, btn_open, btn_clear):
+        for b in (self.btn_start, self.btn_stop, btn_del, btn_clear):
             row_btns.addWidget(b)
         row_btns.addStretch(1)
         v.addLayout(row_btns)
-        root.addWidget(grp, 2)
+        splitter.addWidget(grp)
 
         grp2 = QGroupBox("日志")
         v2 = QVBoxLayout(grp2)
+        v2.setContentsMargins(10, 14, 10, 8)
+        v2.setSpacing(6)
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("log")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        self.log_view.setFont(QFont("Consolas", 9))
         v2.addWidget(self.log_view)
-        root.addWidget(grp2, 1)
+        log_btns = QHBoxLayout()
+        btn_clear_log = QPushButton("清空日志")
+        btn_clear_log.clicked.connect(lambda: self.log_view.clear())
+        log_btns.addStretch(1)
+        log_btns.addWidget(btn_clear_log)
+        v2.addLayout(log_btns)
+        splitter.addWidget(grp2)
+
+        splitter.setSizes([420, 260])
+        root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
+        self.setStyleSheet(STYLE)
 
     def _tab_links(self):
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
         v.addWidget(QLabel("粘贴糖豆分享链接或 vid 编号（每行一个，可多行）："))
         self.edit_links = QPlainTextEdit()
         self.edit_links.setPlaceholderText(
-            "https://www.tangdoucdn.com/h5/play?vid=20000002258422&...\n20000002258422")
-        v.addWidget(self.edit_links)
-        b = QPushButton("＋ 加入任务")
-        b.clicked.connect(self.add_links)
-        v.addWidget(b, 0, Qt.AlignRight)
+            "https://www.tangdoucdn.com/h5/play?vid=20000002258422&...\n20000002258422\n\n"
+            "提示：糖豆 App 中 视频 → 分享 → 复制链接")
+        self.edit_links.setMinimumHeight(120)
+        v.addWidget(self.edit_links, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_clear = QPushButton("清空")
+        btn_clear.clicked.connect(lambda: self.edit_links.clear())
+        row.addWidget(btn_clear)
+        btn_add = QPushButton("＋ 加入任务")
+        btn_add.setObjectName("primary")
+        btn_add.clicked.connect(self.add_links)
+        row.addWidget(btn_add)
+        v.addLayout(row)
         return w
 
     def _tab_song(self):
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
         row = QHBoxLayout()
         row.addWidget(QLabel("歌名:"))
         self.edit_song = QLineEdit()
@@ -206,6 +325,8 @@ class MainWindow(QMainWindow):
         self.edit_song.returnPressed.connect(self.do_search)
         row.addWidget(self.edit_song, 1)
         self.btn_search = QPushButton("搜索")
+        self.btn_search.setObjectName("primary")
+        self.btn_search.setMinimumWidth(90)
         self.btn_search.clicked.connect(self.do_search)
         row.addWidget(self.btn_search)
         v.addLayout(row)
@@ -214,25 +335,34 @@ class MainWindow(QMainWindow):
         self.list_results = QListWidget()
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         v.addWidget(self.list_results, 1)
-        b1 = QPushButton("＋ 将选中结果加入任务")
-        b1.clicked.connect(self.add_selected_results)
-        v.addWidget(b1, 0, Qt.AlignRight)
+        row2 = QHBoxLayout()
+        row2.addStretch(1)
+        btn_add = QPushButton("＋ 将选中结果加入任务")
+        btn_add.setObjectName("primary")
+        btn_add.clicked.connect(self.add_selected_results)
+        row2.addWidget(btn_add)
+        v.addLayout(row2)
 
-        v.addSpacing(8)
-        v.addWidget(QLabel("若自动搜索无结果（糖豆网页搜索已下线）：在糖豆 App 里搜索歌名 → "
-                          "点开视频 → 分享 → 复制链接，粘贴到下面："))
+        v.addSpacing(4)
+        v.addWidget(QLabel("自动搜索无结果时：在糖豆 App 搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到下面："))
         self.edit_paste = QPlainTextEdit()
         self.edit_paste.setPlaceholderText("粘贴 App 分享链接，每行一个")
-        self.edit_paste.setMaximumHeight(90)
+        self.edit_paste.setMaximumHeight(80)
         v.addWidget(self.edit_paste)
-        b2 = QPushButton("＋ 将粘贴的链接加入任务")
-        b2.clicked.connect(self.add_pasted_links)
-        v.addWidget(b2, 0, Qt.AlignRight)
+        row3 = QHBoxLayout()
+        row3.addStretch(1)
+        btn_paste = QPushButton("＋ 将粘贴的链接加入任务")
+        btn_paste.setObjectName("primary")
+        btn_paste.clicked.connect(self.add_pasted_links)
+        row3.addWidget(btn_paste)
+        v.addLayout(row3)
         return w
 
     def _tab_related(self):
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
         row = QHBoxLayout()
         row.addWidget(QLabel("基准视频 vid:"))
         self.edit_base_vid = QLineEdit()
@@ -245,18 +375,27 @@ class MainWindow(QMainWindow):
         self.spin_limit.setRange(1, 20)
         self.spin_limit.setValue(20)
         row.addWidget(self.spin_limit)
-        b = QPushButton("＋ 加入任务")
-        b.clicked.connect(self.add_related)
-        row.addWidget(b)
+        btn = QPushButton("＋ 加入任务")
+        btn.setObjectName("primary")
+        btn.clicked.connect(self.add_related)
+        row.addWidget(btn)
         v.addLayout(row)
-        v.addWidget(QLabel("说明：拉取该视频的 20 个相关推荐（通常是同一首歌的其他版本），"
-                          "逐个解析加入任务；勾选“仅下载舞曲 mp3”则直接下载糖豆舞曲音频。"))
+        hint = QLabel("说明：拉取该视频的 20 个相关推荐（通常是同一首歌的其他版本）逐个加入任务；\n"
+                      "勾选「仅下载舞曲 mp3」则直接下载糖豆舞曲原音频，无需安装 ffmpeg。")
+        hint.setStyleSheet("color: #6b7280;")
+        v.addWidget(hint)
         v.addStretch(1)
         return w
 
     # ---------------- 工具方法 ----------------
     def log(self, text):
         self.log_view.appendPlainText(text)
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _update_task_count(self):
+        n = self.table.rowCount()
+        self.grp_tasks.setTitle(f"任务列表（共 {n} 项）")
 
     def _pick_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择保存目录", self.edit_dir.text())
@@ -269,9 +408,13 @@ class MainWindow(QMainWindow):
         r = self.table.rowCount()
         self.table.insertRow(r)
         item_status = QTableWidgetItem(STATUS_WAIT)
+        item_status.setForeground(QBrush(STATUS_COLORS[STATUS_WAIT]))
+        item_status.setTextAlignment(Qt.AlignCenter)
         item_title = QTableWidgetItem(title or key)
         item_title.setData(Qt.UserRole, key)      # 任务 key（vid 或 mp3url）
         item_title.setData(Qt.UserRole + 1, kind)  # 任务类型
+        item_title.setData(Qt.UserRole + 2, "")    # 完成后的 mp4 路径
+        item_title.setData(Qt.UserRole + 3, "")    # 完成后的 mp3 路径
         self.table.setItem(r, 0, item_status)
         self.table.setItem(r, 1, item_title)
         bar = QProgressBar()
@@ -280,7 +423,18 @@ class MainWindow(QMainWindow):
         bar.setFormat("等待")
         self.table.setCellWidget(r, 2, bar)
         self._row_of_key[key] = r
+        self._update_task_count()
         return r
+
+    def _set_row_status(self, r, status, bar_text=None, bar_value=None):
+        item = self.table.item(r, 0)
+        item.setText(status)
+        item.setForeground(QBrush(STATUS_COLORS.get(status, QColor("#1f2937"))))
+        bar = self.table.cellWidget(r, 2)
+        if bar_text is not None:
+            bar.setFormat(bar_text)
+        if bar_value is not None:
+            bar.setValue(bar_value)
 
     def _enqueue_links(self, text):
         added = 0
@@ -300,10 +454,14 @@ class MainWindow(QMainWindow):
     @Slot()
     def add_links(self):
         self._enqueue_links(self.edit_links.toPlainText())
+        if self.edit_links.toPlainText().strip():
+            self.edit_links.clear()
 
     @Slot()
     def add_pasted_links(self):
         self._enqueue_links(self.edit_paste.toPlainText())
+        if self.edit_paste.toPlainText().strip():
+            self.edit_paste.clear()
 
     @Slot()
     def do_search(self):
@@ -316,7 +474,7 @@ class MainWindow(QMainWindow):
         self.log(f"== 搜索歌名: {kw} ==")
         self._search_worker = SearchWorker(kw, self)
         self._search_worker.search_done.connect(self._on_search_done)
-        self._search_worker.search_log.connect(self.log)  # 搜索过程的提示/错误进入日志区
+        self._search_worker.search_log.connect(self.log)
         self._search_worker.start()
 
     @Slot(list)
@@ -429,17 +587,16 @@ class MainWindow(QMainWindow):
         self._worker.log.connect(self.log)
         self._worker.all_done.connect(self._on_all_done)
         self._worker.start()
-        self.statusBar().showMessage("开始下载…")
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.statusBar().showMessage(f"开始下载 {len(tasks)} 个任务…")
 
     @Slot(str, str)
     def _on_task_started(self, key, title):
         self._current_key = key
         r = self._row_of_key.get(key)
         if r is not None:
-            self.table.item(r, 0).setText(STATUS_RUN)
-            bar = self.table.cellWidget(r, 2)
-            bar.setValue(0)
-            bar.setFormat("准备中…")
+            self._set_row_status(r, STATUS_RUN, "准备中…", 0)
 
     @Slot(str, int, int)
     def _on_task_progress(self, key, done, total):
@@ -459,13 +616,16 @@ class MainWindow(QMainWindow):
     def _on_task_done(self, key, ok, mp4, mp3):
         r = self._row_of_key.get(key)
         if r is not None:
-            self.table.item(r, 0).setText(STATUS_OK if ok else STATUS_FAIL)
-            bar = self.table.cellWidget(r, 2)
-            bar.setValue(100 if ok else 0)
-            bar.setFormat("100%" if ok else "失败")
+            status = STATUS_OK if ok else STATUS_FAIL
+            self._set_row_status(r, status, "100%" if ok else "失败", 100 if ok else 0)
+            item = self.table.item(r, 1)
+            item.setData(Qt.UserRole + 2, mp4)
+            item.setData(Qt.UserRole + 3, mp3)
 
     @Slot()
     def _on_all_done(self):
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
         self.statusBar().showMessage("全部任务结束")
         self._current_key = None
 
@@ -473,6 +633,7 @@ class MainWindow(QMainWindow):
     def stop_download(self):
         if self._worker and self._worker.isRunning():
             self._worker.requestInterruption()
+            self.btn_stop.setEnabled(False)
             self.log("正在停止（当前文件下完即停）…")
             self.statusBar().showMessage("停止中…")
 
@@ -491,6 +652,60 @@ class MainWindow(QMainWindow):
                 if key and key in self._row_of_key:
                     del self._row_of_key[key]
                 self.table.removeRow(r)
+        self._update_task_count()
+
+    @Slot()
+    def delete_selected_tasks(self):
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+        if not rows:
+            QMessageBox.information(self, "提示", "请先选中要删除的任务行")
+            return
+        for r in rows:
+            item = self.table.item(r, 1)
+            key = item.data(Qt.UserRole)
+            if key and key in self._row_of_key:
+                del self._row_of_key[key]
+            self.table.removeRow(r)
+        self._update_task_count()
+
+    # ---------------- 表格交互 ----------------
+    def _on_table_menu(self, pos):
+        r = self.table.rowAt(pos.y())
+        if r < 0:
+            return
+        self.table.selectRow(r)
+        menu = QMenu(self)
+        act_open = menu.addAction("打开所在文件夹")
+        act_del = menu.addAction("删除该任务")
+        act = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if act == act_open:
+            item = self.table.item(r, 1)
+            mp4 = item.data(Qt.UserRole + 2) or ""
+            mp3 = item.data(Qt.UserRole + 3) or ""
+            path = mp4 or mp3
+            if path and os.path.exists(path):
+                os.startfile(os.path.dirname(os.path.abspath(path)))
+            else:
+                self.open_dir()
+        elif act == act_del:
+            item = self.table.item(r, 1)
+            key = item.data(Qt.UserRole)
+            if key and key in self._row_of_key:
+                del self._row_of_key[key]
+            self.table.removeRow(r)
+            self._update_task_count()
+
+    def _on_table_double_click(self, row, col):
+        item = self.table.item(row, 1)
+        if item is None:
+            return
+        mp4 = item.data(Qt.UserRole + 2) or ""
+        mp3 = item.data(Qt.UserRole + 3) or ""
+        path = mp4 or mp3
+        if path and os.path.exists(path):
+            os.startfile(os.path.dirname(os.path.abspath(path)))
+        else:
+            self.open_dir()
 
 
 def main():
