@@ -316,6 +316,7 @@ class MainWindow(QMainWindow):
         self.log(f"== 搜索歌名: {kw} ==")
         self._search_worker = SearchWorker(kw, self)
         self._search_worker.search_done.connect(self._on_search_done)
+        self._search_worker.search_log.connect(self.log)  # 搜索过程的提示/错误进入日志区
         self._search_worker.start()
 
     @Slot(list)
@@ -493,6 +494,24 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    import traceback as _tb
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        """全局异常兜底：日志区展示，并弹友好提示，不裸奔崩溃。"""
+        msg = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
+        app = QApplication.instance()
+        if app is not None:
+            for w in app.topLevelWidgets():
+                if isinstance(w, MainWindow):
+                    w.log_view.appendPlainText("【异常】\n" + msg)
+            QMessageBox.critical(
+                None, "出错了",
+                f"程序遇到未处理的错误：\n{exc_type.__name__}: {exc_value}\n\n"
+                "详情见日志区。如果反复出现，请把日志反馈给开发者。")
+        else:
+            sys.stderr.write(msg)
+
+    sys.excepthook = _excepthook
     app = QApplication(sys.argv)
     app.setApplicationName("糖豆广场舞下载器")
     win = MainWindow()

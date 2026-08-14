@@ -395,17 +395,17 @@ def sogou_search(keyword):
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
         last = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                with _ur.urlopen(req, timeout=20) as resp:
+                with _ur.urlopen(req, timeout=15) as resp:
                     body = resp.read().decode("utf-8", "ignore")
                 if len(body) > 20000:  # 太短说明被反爬页拦了，重试
                     return body
                 last = "页面过短（可能被反爬拦截）"
-                time.sleep(3 + attempt * 3)
+                time.sleep(2 + attempt * 2)
             except Exception as e:
                 last = e
-                time.sleep(3 + attempt * 3)
+                time.sleep(2 + attempt * 2)
         raise RuntimeError(last)
 
     def _resolve(link):
