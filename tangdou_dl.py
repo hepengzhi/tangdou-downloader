@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 糖豆广场舞下载器 (tangdou_dl.py)
@@ -108,15 +108,37 @@ def head_ok(url, timeout=20):
         return False
 
 
-def try_better_quality(play_url):
-    """play_url 默认 H540P；尝试替换为 H720P 升清晰度。"""
-    for q in ("H720P", "V720P", "H1080P"):
-        if q in play_url:
-            return play_url
-        cand = play_url.replace("H540P", q)
+QUALITIES = ("H1080P", "V1080P", "H720P", "V720P", "H540P", "V540P", "H360P", "V360P")
+
+
+def resolve_qualities(play_url):
+    """枚举 play_url 里可能存在的所有清晰度，返回 {清晰度: 可用URL}（按顺序）。"""
+    m = re.search(r"_(H?\d+P|V?\d+P)", play_url)
+    if not m:
+        return {"原清晰度": play_url} if head_ok(play_url) else {}
+    tag = m.group(1)
+    out = {}
+    for q in QUALITIES:
+        cand = play_url.replace(tag, q)
         if cand != play_url and head_ok(cand):
-            return cand
-    return play_url
+            out[q] = cand
+    if tag not in out and head_ok(play_url):
+        out[tag] = play_url
+    return out
+
+
+def get_video_url_html(vid):
+    """HTML 解析兜底：share.tangdou.com/splay.php 页面里的 <video> 标签。
+    在 API 不可用时作为备用视频地址来源。"""
+    url = f"http://share.tangdou.com/splay.php?vid={vid}"
+    req = urllib.request.Request(url, headers=HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+    except Exception:
+        return None
+    m = re.search(r'<video[^>]*src="([^"]+)"', html, re.I)
+    return m.group(1) if m else None
 
 
 def download(url, dest, timeout=60, retries=3, log=print, progress=None):
@@ -178,6 +200,30 @@ def extract_mp3(ffmpeg, mp4_path, mp3_path):
         return False, str(e)
 
 
+def clip_video(ffmpeg, mp4_path, clip_range, log=print):
+    """用 ffmpeg 剪辑视频片段（尽量流拷贝，失败则重编码）。返回剪辑后路径。"""
+    try:
+        start, end = clip_range.split("-", 1)
+    except ValueError:
+        log(f"    ! 剪辑参数格式应为 开始-结束，如 00:01:30-00:02:30，收到: {clip_range}")
+        return mp4_path
+    base, ext = os.path.splitext(mp4_path)
+    out = base + "_clip" + ext
+    args = [ffmpeg, "-y", "-i", mp4_path, "-ss", start.strip(), "-to", end.strip(),
+            "-c", "copy", out]
+    r = subprocess.run(args, capture_output=True, timeout=600)
+    if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+        # 流拷贝失败（如关键帧对齐问题），改用重编码
+        args = [ffmpeg, "-y", "-i", mp4_path, "-ss", start.strip(), "-to", end.strip(),
+                "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", out]
+        r = subprocess.run(args, capture_output=True, timeout=1200)
+    if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
+        log(f"    剪辑完成 -> {os.path.basename(out)}")
+        return out
+    log("    ! 剪辑失败（保持原视频）")
+    return mp4_path
+
+
 def get_video_info(vid):
     j = http_get_json(API_PLAY.format(vid=vid))
     if j.get("code") != 0 or not j.get("data"):
@@ -192,32 +238,91 @@ def get_related(vid):
     return j.get("data") or []
 
 
-def download_video(vid, outdir, want_audio=True, quality="auto", log=print, progress=None):
+def _pick_quality_url(play_url, quality):
+    """按 quality(auto/h720p/h540p) 挑选最终播放地址。"""
+    m = re.search(r"_(H?\d+P|V?\d+P)", play_url)
+    base_tag = m.group(1) if m else None
+    if quality == "h540p" or base_tag is None:
+        return play_url
+    if quality == "h720p":
+        for q in ("H720P", "V720P", "H1080P"):
+            if q == base_tag:
+                return play_url
+            cand = play_url.replace(base_tag, q)
+            if head_ok(cand):
+                return cand
+        return play_url
+    # auto：优先 720P，逐级回退
+    for q in ("H720P", "V720P", "H1080P"):
+        if q == base_tag:
+            return play_url
+        cand = play_url.replace(base_tag, q)
+        if head_ok(cand):
+            return cand
+    return play_url
+
+
+def download_video(vid, outdir, want_audio=True, quality="auto", log=print, progress=None, clip=None):
     """下载单个视频 + 提取音频。返回 (ok, mp4路径, mp3路径)。
-    log: 日志回调；progress: 进度回调(done_bytes, total_bytes)。"""
+    quality: auto(优先720P) / h720p / h540p / all(全部清晰度)
+    clip: "开始-结束"（如 00:01:30-00:02:30），下载后剪辑出片段。"""
     info = get_video_info(vid)
     title = sanitize(info.get("title") or vid)
     log(f"\n[{vid}] {title}")
 
     play_url = info.get("play_url")
     if not play_url:
-        log("    ! 未拿到播放地址")
-        return False, None, None
-    if quality in ("auto", "h720p"):
-        play_url = try_better_quality(play_url)
+        log("    主接口未返回播放地址，尝试 HTML 解析兜底…")
+        play_url = get_video_url_html(vid)
+        if not play_url:
+            log("    ! 未能获取视频地址")
+            return False, None, None
+
+    if quality == "all":
+        qualities = resolve_qualities(play_url)
+        if not qualities:
+            log("    ! 未检测到任何可用清晰度")
+            return False, None, None
+        log(f"    可用清晰度: {', '.join(qualities.keys())}")
+        first = None
+        ok_any = False
+        for q, url in qualities.items():
+            mp4, mp3 = _download_one(vid, title, url, outdir, want_audio, log, progress,
+                                     suffix="_" + q, clip=clip)
+            if mp4:
+                ok_any = True
+                if first is None:
+                    first = (mp4, mp3)
+        return ok_any, (first[0] if first else None), (first[1] if first else None)
+
+    play_url = _pick_quality_url(play_url, quality)
     qm = re.search(r"_(H?\d+P|V?\d+P)", play_url)
     log(f"    清晰度: {qm.group(1) if qm else '?'}")
+    mp4, mp3 = _download_one(vid, title, play_url, outdir, want_audio, log, progress, clip=clip)
+    return bool(mp4), mp4, mp3
 
-    mp4 = os.path.join(outdir, title + ".mp4")
+
+def _download_one(vid, title, play_url, outdir, want_audio, log, progress, suffix="", clip=None):
+    """下载一个具体地址的视频 + 提取音频。返回 (mp4路径, mp3路径)。"""
+    mp4 = os.path.join(outdir, title + suffix + ".mp4")
     if os.path.exists(mp4) and os.path.getsize(mp4) > 0:
         log("    视频已存在，跳过下载")
     else:
         log(f"    下载视频 -> {os.path.basename(mp4)}")
         if not download(play_url, mp4, log=log, progress=progress):
             log("    ! 视频下载失败")
-            return False, None, None
+            return None, None
 
-    mp3 = os.path.join(outdir, title + ".mp3")
+    if clip:
+        ffmpeg = find_ffmpeg()
+        if ffmpeg:
+            clipped = clip_video(ffmpeg, mp4, clip, log=log)
+            if clipped != mp4:
+                return clipped, None
+        else:
+            log("    ! 未找到 ffmpeg，跳过剪辑")
+
+    mp3 = os.path.join(outdir, title + suffix + ".mp3")
     if want_audio:
         if os.path.exists(mp3) and os.path.getsize(mp3) > 0:
             log("    音频已存在，跳过")
@@ -231,7 +336,7 @@ def download_video(vid, outdir, want_audio=True, quality="auto", log=print, prog
                     log(f"    音频已提取 ({kind})")
                 else:
                     log(f"    ! 音频提取失败: {kind}")
-    return True, mp4, mp3
+    return mp4, mp3
 
 
 def download_related(vid, outdir, audio_only=False, limit=20, log=print, progress=None):
@@ -330,7 +435,7 @@ def sogou_search(keyword):
     return results
 
 
-def song_mode(keyword, outdir, want_audio, quality, log=print):
+def song_mode(keyword, outdir, want_audio, quality, log=print, clip=None):
     log(f"\n== 搜索歌名: {keyword} ==")
     results = sogou_search(keyword)
     tangdou_items = [r for r in results if r.get("vid")]
@@ -351,7 +456,7 @@ def song_mode(keyword, outdir, want_audio, quality, log=print):
         else:
             chosen = [tangdou_items[int(choice) - 1]]
         for r in chosen:
-            download_video(r["vid"], outdir, want_audio, quality, log=log)
+            download_video(r["vid"], outdir, want_audio, quality, log=log, clip=clip)
     else:
         log("未找到糖豆站内视频（糖豆官网搜索已下线，站内视频未被搜索引擎收录）。")
         log("请按下面步骤操作一次，之后全部自动：")
@@ -365,7 +470,7 @@ def song_mode(keyword, outdir, want_audio, quality, log=print):
                     break
                 vid = extract_vid(line)
                 if vid:
-                    download_video(vid, outdir, want_audio, quality, log=log)
+                    download_video(vid, outdir, want_audio, quality, log=log, clip=clip)
                 else:
                     log("  无法识别，请确认是糖豆的分享链接或 vid 编号")
         except EOFError:
@@ -389,8 +494,10 @@ def parse_args():
     p.add_argument("--audio-only", action="store_true", help="--related 时只下载舞曲 mp3")
     p.add_argument("--limit", type=int, default=20, help="--related 最多下载个数")
     p.add_argument("--no-audio", action="store_true", help="不提取音频")
-    p.add_argument("--quality", choices=["auto", "h540p", "h720p"], default="auto",
-                   help="清晰度（默认 auto=优先720P）")
+    p.add_argument("--quality", choices=["auto", "h540p", "h720p", "all"], default="auto",
+                   help="清晰度（默认 auto=优先720P；all=下载全部可用清晰度）")
+    p.add_argument("--clip", metavar="开始-结束", default=None,
+                   help="下载后剪辑片段，如 00:01:30-00:02:30")
     p.add_argument("--dir", default="Download", help="保存目录（默认 Download）")
     return p.parse_args()
 
@@ -405,11 +512,12 @@ def main():
     args = parse_args()
     outdir = args.dir
     os.makedirs(outdir, exist_ok=True)
-    quality = {"auto": "auto", "h540p": "h540p", "h720p": "h720p"}[args.quality]
+    quality = args.quality
     want_audio = not args.no_audio
+    clip = args.clip
 
     if args.song:
-        song_mode(args.song, outdir, want_audio, quality)
+        song_mode(args.song, outdir, want_audio, quality, clip=clip)
         return
 
     if args.related:
@@ -425,7 +533,7 @@ def main():
         if not vid:
             print(f"无法从「{t}」识别 vid，跳过")
             continue
-        download_video(vid, outdir, want_audio, quality)
+        download_video(vid, outdir, want_audio, quality, clip=clip)
 
     print(f"\n完成！文件保存在: {os.path.abspath(outdir)}")
 
@@ -436,3 +544,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n已取消")
         sys.exit(1)
+

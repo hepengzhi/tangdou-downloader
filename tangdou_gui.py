@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.combo_quality.addItem("自动(优先720P)", "auto")
         self.combo_quality.addItem("720P", "h720p")
         self.combo_quality.addItem("540P", "h540p")
+        self.combo_quality.addItem("全部清晰度", "all")
         cfg.addWidget(self.combo_quality)
         self.check_audio = QCheckBox("提取音频(mp3)")
         self.check_audio.setChecked(True)
