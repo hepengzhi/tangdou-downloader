@@ -1,93 +1,199 @@
-# 糖豆广场舞下载器 (tangdou_dl.py / tangdou_gui.py)
+# 糖豆广场舞下载器 (Tangdou Downloader)
 
-给歌名/链接，自动下载糖豆广场舞视频(mp4) + 音频(mp3)。
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
+[![GUI](https://img.shields.io/badge/GUI-PySide6-green)](https://pypi.org/project/PySide6/)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
 
-提供两种界面：
-- **`tangdou_gui.py`** — PySide6 (Qt) 图形界面（推荐，行业标准 GUI 方案）
-- **`tangdou_dl.py`** — 命令行版
+> 输入糖豆广场舞视频链接 / vid / 歌名，自动下载视频（MP4）与音频（MP3）。
 
-命令行版纯 Python 标准库实现，无第三方依赖；GUI 版需 `pip install PySide6`。
-音频提取自动使用系统 ffmpeg 或 pip 包 `imageio-ffmpeg` 自带的 ffmpeg 二进制。
+本项目提供 **图形界面（GUI）** 与 **命令行（CLI）** 两种使用方式，无需登录糖豆账号即可下载。
 
-## 图形界面（推荐）
+---
 
-```bash
-pip install PySide6            # 仅 GUI 需要
-python tangdou_gui.py
-```
+## 目录
 
-界面三个页签 + 任务表 + 日志：
-- **链接下载**：粘贴糖豆 App 分享链接或 vid（每行一个）→ 加入任务
-- **歌名搜索**：输入歌名自动搜糖豆站内链接；搜不到时按界面提示在 App 里搜歌名、
-  分享、把链接粘贴到下方输入框
-- **相关批量**：输入一个 vid，一键加入它的 20 个相关视频（通常同歌其他版本），
-  可勾选"仅下载舞曲 mp3"直接拿糖豆舞曲原音频
+- [功能特性](#功能特性)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [快速开始](#快速开始)
+  - [图形界面（推荐）](#图形界面推荐)
+  - [命令行](#命令行)
+- [命令行参数](#命令行参数)
+- [使用示例](#使用示例)
+- [项目结构](#项目结构)
+- [工作原理](#工作原理)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
+- [免责声明](#免责声明)
+- [许可证](#许可证)
 
-顶部可切换清晰度（自动/720P/540P）、是否提取 mp3、保存目录。后台线程下载不卡界面，
-任务表实时进度条，可停止、打开保存目录。
+---
 
-## 命令行用法
+## 功能特性
 
-```bash
-# 1) 给链接/vid，下载视频+音频（最常用）
-python tangdou_dl.py "https://www.tangdoucdn.com/h5/play?vid=20000002258422&utm_..." 
-python tangdou_dl.py 20000002258422
-```
+- ✅ **按链接 / vid 下载**：粘贴糖豆 App 分享链接或 vid 编号，自动下载视频并提取音频
+- ✅ **按歌名搜索**：输入歌名自动搜索；糖豆网页搜索已下线时，引导粘贴 App 分享链接兜底
+- ✅ **相关视频批量下载**：一键拉取某视频的 20 个相关推荐（通常为同一首歌的其他版本）
+- ✅ **舞曲 MP3**：直接下载糖豆舞曲原音频，或从视频中提取音轨（ffmpeg）
+- ✅ **清晰度选择**：自动优先 720P，可回退 540P
+- ✅ **后台任务队列**：GUI 线程下载不卡界面，实时进度条、日志、可停止
 
-## 为什么做这个
+---
 
-GitHub 上现有的糖豆下载器（CCBP/TangdouDownloader、SwaggyMacro/TangdouDownloader 等）
-都**只能输入视频链接/vid**，不支持"给歌名直接搜"。而糖豆官网的网页搜索功能已下线
-（`/so/search.htm` 已 404），搜索只剩 App 内有。本工具在保留"链接下载"的基础上，
-补上歌名模式的自动搜索 + App 粘贴兜底，并把每个视频的 20 个相关视频（通常是同一首歌的
-其他版本）做成一键批量下载，视频、舞曲 mp3 都能下。
+## 环境要求
+
+| 依赖 | 说明 |
+|---|---|
+| Python 3.8+ | 必需 |
+| PySide6 | 仅 GUI 需要（`pip install PySide6`） |
+| ffmpeg | 音频提取需要；可用 `pip install imageio-ffmpeg` 自动获得 |
+
+> CLI 版仅使用 Python 标准库，无第三方依赖。
+
+---
 
 ## 安装
 
 ```bash
-# 只装 Python 3.8+（无需任何 pip 包即可下载视频）
-# 音频提取二选一：
-#   1) 系统已有 ffmpeg -> 直接可用
-#   2) 没有 ffmpeg  -> 一行命令自带：
-python -m pip install imageio-ffmpeg
+# 1. 克隆或下载本项目
+git clone https://github.com/hepengzhi/tangdou-downloader.git
+cd tangdou-downloader
+
+# 2. 安装 GUI 依赖（仅使用图形界面时需要）
+pip install PySide6
+
+# 3. 安装音频提取依赖（二选一）
+#    方案 A：系统已安装 ffmpeg —— 无需任何操作
+#    方案 B：自动获取 ffmpeg 二进制
+pip install imageio-ffmpeg
 ```
 
-## 用法
+---
+
+## 快速开始
+
+### 图形界面（推荐）
 
 ```bash
-# 1) 给链接/vid，下载视频+音频（最常用）
-python tangdou_dl.py "https://www.tangdoucdn.com/h5/play?vid=20000002258422&utm_..." 
-python tangdou_dl.py 20000002258422
-
-# 2) 给歌名（自动搜索糖豆站内链接；搜不到会引导你在 App 里搜歌名后粘贴分享链接，之后全自动）
-python tangdou_dl.py --song "最炫民族风"
-
-# 3) 批量下载某视频的相关视频（同歌其他版本，20 个）
-python tangdou_dl.py --related 20000002258422
-#    只下舞曲 mp3：
-python tangdou_dl.py --related 20000002258422 --audio-only
-
-# 常用选项
---no-audio        # 只要视频
---quality h540p   # 清晰度（默认 auto：优先 720P，自动回退 540P）
---dir "D:/广场舞" # 保存目录（默认 ./Download）
+python tangdou_gui.py
 ```
 
-一次可粘贴/输入多个链接，每行一个。
+界面包含三个功能页签与任务管理区：
 
-## 工作原理（2026 年实测，无需登录）
+| 页签 | 用途 |
+|---|---|
+| **链接下载** | 粘贴分享链接或 vid（每行一个）→ 加入任务 |
+| **歌名搜索** | 输入歌名搜索糖豆站内链接；无结果时按提示在 App 内搜索并粘贴分享链接 |
+| **相关批量** | 输入基准 vid，一键批量下载其相关视频（可仅下载舞曲 MP3） |
+
+顶部工具栏可切换清晰度（自动 / 720P / 540P）、是否提取音频、保存目录；
+任务表实时显示进度，支持停止下载、打开保存目录。
+
+### 命令行
+
+```bash
+# 1) 按链接 / vid 下载（视频 + 音频）
+python tangdou_dl.py "https://www.tangdoucdn.com/h5/play?vid=20000002258422&utm_..."
+python tangdou_dl.py 20000002258422
+
+# 2) 按歌名搜索下载
+python tangdou_dl.py --song "最炫民族风"
+
+# 3) 批量下载相关视频（同歌其他版本）
+python tangdou_dl.py --related 20000002258422
+python tangdou_dl.py --related 20000002258422 --audio-only   # 仅舞曲 MP3
+```
+
+---
+
+## 命令行参数
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `targets` | 糖豆分享链接或 vid 编号，可多个 | — |
+| `--song 歌名` | 按歌名搜索下载 | — |
+| `--related vid` | 批量下载某视频的相关视频 | — |
+| `--audio-only` | 与 `--related` 连用，仅下载舞曲 MP3 | 关闭 |
+| `--limit N` | `--related` 最大下载个数 | 20 |
+| `--no-audio` | 不提取音频 | 关闭 |
+| `--quality {auto,h540p,h720p}` | 清晰度 | `auto`（优先 720P） |
+| `--dir 路径` | 保存目录 | `./Download` |
+
+---
+
+## 使用示例
+
+```bash
+# 批量下载多个链接（每行一个）
+python tangdou_dl.py \
+  "https://www.tangdoucdn.com/h5/play?vid=20000002258422" \
+  "https://www.tangdou.com/play/?vid=20000013474038"
+
+# 指定清晰度与保存目录，仅下载视频
+python tangdou_dl.py 20000002258422 --quality h540p --no-audio --dir "D:/广场舞"
+```
+
+---
+
+## 项目结构
+
+```
+tangdou-downloader/
+├── tangdou_dl.py      # 命令行版 + 核心下载逻辑（标准库实现）
+├── tangdou_gui.py     # PySide6 图形界面
+├── smoke_gui.py       # GUI 离屏自动化冒烟测试
+├── README.md          # 本文档
+└── LICENSE            # MIT 许可证
+```
+
+---
+
+## 工作原理
+
+糖豆的下载接口无需登录即可访问，本项目基于以下接口实现（2026 年实测可用）：
 
 | 功能 | 接口 |
 |---|---|
-| 视频信息+播放地址 | `GET api-h5.tangdou.com/mtangdou/video/play?vid={vid}` → `data.play_url`（默认 540P，URL 内替换为 H720P 可升清晰度，已验证） |
-| 相关视频（含舞曲mp3） | `GET api-h5.tangdou.com/sample/share/recommend?page_num=1&vid={vid}` → `data[]` 每项含 `videourl`、`mp3url` |
-| 下载请求头 | 必须带 `Referer: https://www.tangdoucdn.com`，否则拿到的是默认 `hello.mp4` |
+| 视频信息与播放地址 | `GET https://api-h5.tangdou.com/mtangdou/video/play?vid={vid}` → `data.play_url`（默认 540P，URL 中替换为 `H720P` 可升清晰度） |
+| 相关视频（含舞曲 MP3） | `GET https://api-h5.tangdou.com/sample/share/recommend?page_num=1&vid={vid}` → `data[]`，每项含 `videourl` 与 `mp3url` |
+| 文件下载请求头 | 必须携带 `Referer: https://www.tangdoucdn.com`，否则返回默认 `hello.mp4` |
 
-音频来源：下载的 mp4 用 ffmpeg 提取音轨转 mp3（忠实于该视频所用音乐）；
-`--related --audio-only` 直接下载糖豆的舞曲 mp3 原文件。
+**音频来源**：
+1. 从下载的 MP4 中用 ffmpeg 提取音轨转 MP3（忠实于视频所用音乐）；
+2. `--related --audio-only` 模式直接下载糖豆舞曲 MP3 原文件。
+
+---
+
+## 常见问题
+
+**Q：为什么"按歌名搜索"经常搜不到结果？**
+糖豆官网的网页搜索功能已下线（`/so/search.htm` 返回 404），站内视频未被搜索引擎收录。
+请在糖豆 App 中搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到工具中即可继续自动下载。
+
+**Q：音频提取失败？**
+确认已安装 ffmpeg 或 `pip install imageio-ffmpeg`。命令行模式会打印跳过提示。
+
+**Q：下载到的是 `hello.mp4`？**
+下载请求缺少 `Referer` 请求头，请使用本项目脚本（已内置正确请求头）。
+
+---
 
 ## 已知限制
 
-- 歌名的"自动搜索"依赖搜狗收录的糖豆站内链接，通常搜不到（糖豆网页搜索下线导致站内页未被索引），
-  此时工具会给出清晰的 App 操作指引，粘贴一次分享链接即可继续全自动。
-- 需要网络可达 tangdou.com；接口若变动，工具会打印明确错误。
+- "按歌名搜索"依赖搜索引擎对糖豆站内页的收录，通常无结果；工具会引导用户通过 App 分享链接兜底。
+- 需要网络可达 `tangdou.com`；若糖豆调整接口，脚本会打印明确错误，更新即可。
+- 下载受糖豆服务端带宽与限流影响，为单线程下载。
+
+---
+
+## 免责声明
+
+本项目仅用于个人学习、研究与合法范围内的内容备份。请尊重糖豆平台及视频作者的版权，
+**不得将下载内容用于商业用途或未经授权的传播**。因使用本项目产生的一切法律责任由使用者自行承担。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © 2026 hepengzhi
