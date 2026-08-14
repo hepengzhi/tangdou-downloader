@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
         cfg.addWidget(self.check_audio)
         cfg.addSpacing(12)
         cfg.addWidget(QLabel("保存到:"))
-        self.edit_dir = QLineEdit(os.path.abspath("Download"))
+        self.edit_dir = QLineEdit(td.default_download_dir())
         cfg.addWidget(self.edit_dir, 1)
         btn_dir = QPushButton("浏览…")
         btn_dir.clicked.connect(self._pick_dir)

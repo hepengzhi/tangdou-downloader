@@ -1,4 +1,4 @@
-# 糖豆广场舞下载器 (Tangdou Downloader)
+﻿# 糖豆广场舞下载器 (Tangdou Downloader)
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
 [![GUI](https://img.shields.io/badge/GUI-PySide6-green)](https://pypi.org/project/PySide6/)
@@ -121,7 +121,7 @@ python tangdou_dl.py --related 20000002258422 --audio-only   # 仅舞曲 MP3
 | `--no-audio` | 不提取音频 | 关闭 |
 | `--quality {auto,h540p,h720p,all}` | 清晰度 | `auto`（优先 720P；`all` 下载全部可用清晰度） |
 | `--clip 开始-结束` | 下载后剪辑片段，如 `00:01:30-00:02:30` | 关闭 |
-| `--dir 路径` | 保存目录 | `./Download` |
+| `--dir 路径` | 保存目录 | 用户Downloads目录（如 `C:\Users\<用户名>\Downloads`） |
 
 ---
 
@@ -203,3 +203,4 @@ tangdou-downloader/
 ## 许可证
 
 [MIT](LICENSE) © 2026 hepengzhi
+

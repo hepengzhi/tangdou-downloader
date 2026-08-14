@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 糖豆广场舞下载器 (tangdou_dl.py)
@@ -81,6 +81,13 @@ def extract_vid(text):
 def sanitize(name):
     name = ILLEGAL.sub("_", name).strip().strip(".")
     return name[:120] or "video"
+
+
+def default_download_dir():
+    """默认保存目录：用户家目录的 Downloads（不存在则退回家目录）。"""
+    home = os.path.expanduser("~")
+    d = os.path.join(home, "Downloads")
+    return d if os.path.isdir(d) else home
 
 
 def find_ffmpeg():
@@ -498,7 +505,8 @@ def parse_args():
                    help="清晰度（默认 auto=优先720P；all=下载全部可用清晰度）")
     p.add_argument("--clip", metavar="开始-结束", default=None,
                    help="下载后剪辑片段，如 00:01:30-00:02:30")
-    p.add_argument("--dir", default="Download", help="保存目录（默认 Download）")
+    p.add_argument("--dir", default=default_download_dir(),
+                   help="保存目录（默认 用户Downloads目录）")
     return p.parse_args()
 
 
