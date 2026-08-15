@@ -27,7 +27,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tdcore as td  # 核心逻辑包（api/download/search/log）
 
-from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, QEvent, Signal, Slot
 from PySide6.QtGui import QColor, QBrush, QIcon, QAction
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -43,8 +43,10 @@ from qfluentwidgets import (
     TableWidget, ListWidget, ProgressBar, HyperlinkButton,
     InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
+from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
+from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -290,17 +292,104 @@ class DownloadWorker(QThread):
         self.all_done.emit()
 
 
+class ResizableNavigation(NavigationInterface):
+    """左侧导航栏：支持拖拽右侧边缘手动调整宽度，宽度记忆到 QSettings。
+
+    qfluentwidgets 原版导航栏不支持拖动调宽，这里在其 NavigationPanel 上
+    安装事件过滤：右边缘 8px 热区 → 按住拖动 → 实时 setExpandWidth + resize，
+    并通过父类 eventFilter 的宽度同步让右侧内容区自动重排。
+    """
+
+    NAV_MIN = 180   # 展开态最窄宽度（px）
+    NAV_MAX = 480   # 展开态最宽宽度（px）
+    EDGE = 8        # 右侧拖拽热区宽度（px）
+
+    def __init__(self, parent=None, showMenuButton=True, showReturnButton=False, collapsible=True):
+        super().__init__(parent=parent, showMenuButton=showMenuButton,
+                         showReturnButton=showReturnButton, collapsible=collapsible)
+        self._drag_w = None       # 非 None = 正在拖拽（保存当前宽度）
+        self._drag_start_x = 0
+        self._drag_start_w = 0
+        self._hover_edge = False
+        self.panel.setMouseTracking(True)
+
+    # ---------------- 宽度 ----------------
+    def apply_width(self, width):
+        """设置展开宽度（启动时恢复用户保存的宽度）"""
+        width = max(self.NAV_MIN, min(self.NAV_MAX, int(width)))
+        self.panel.setExpandWidth(width)
+
+    def current_width(self):
+        return int(getattr(self.panel, "expandWidth", self.NAV_MIN))
+
+    def _save_width(self):
+        try:
+            QSettings("TangdouDownloader", "TangdouDownloader").setValue("nav_width", self.current_width())
+        except Exception:
+            pass
+
+    def _nav_max(self):
+        # 最宽不能把内容区挤没：至少留 360px 给右侧
+        return max(self.NAV_MIN, min(self.NAV_MAX, self.window().width() - 360))
+
+    def _set_nav_width(self, width):
+        if self.panel.displayMode != NavigationDisplayMode.EXPAND:
+            return
+        width = max(self.NAV_MIN, min(self._nav_max(), int(width)))
+        self.panel.setExpandWidth(width)                 # 更新展开宽度 + 导航项宽度
+        self.panel.resize(width, self.panel.height())    # 触发父类 eventFilter → 外框同步 → 内容重排
+
+    # ---------------- 拖拽 ----------------
+    def _at_edge(self, e):
+        return self.panel.width() - e.position().x() <= self.EDGE
+
+    def eventFilter(self, obj, e):
+        if obj is self.panel:
+            t = e.type()
+            if t == QEvent.MouseButtonPress and e.button() == Qt.LeftButton and self._at_edge(e):
+                if self.panel.displayMode == NavigationDisplayMode.EXPAND:
+                    self._drag_start_x = e.globalPosition().x()
+                    self._drag_start_w = self.panel.width()
+                    self._drag_w = self._drag_start_w
+                    self.panel.setCursor(Qt.SizeHorCursor)
+                    return True
+            elif t == QEvent.MouseMove:
+                if self._drag_w is not None:
+                    dx = e.globalPosition().x() - self._drag_start_x
+                    self._set_nav_width(self._drag_start_w + int(round(dx)))
+                    return True
+                edge = self._at_edge(e) and self.panel.displayMode == NavigationDisplayMode.EXPAND
+                if edge != self._hover_edge:
+                    self._hover_edge = edge
+                    self.panel.setCursor(Qt.SizeHorCursor if edge else Qt.ArrowCursor)
+            elif t == QEvent.MouseButtonRelease and self._drag_w is not None:
+                self._drag_w = None
+                self._hover_edge = False
+                self.panel.setCursor(Qt.ArrowCursor)
+                self._save_width()
+                return True
+        return super().eventFilter(obj, e)
+
+
 class MainWindow(FluentWindow):
     def __init__(self):
+        # 用可拖动调宽的导航栏替换默认导航栏（须在 super().__init__ 之前注入）
+        try:
+            from qfluentwidgets.window import fluent_window as _fw
+            _fw.NavigationInterface = ResizableNavigation
+        except Exception:
+            pass
         super().__init__()
         self._latest_tag = None  # 检测到的新版本（用于标题栏提示）
         self._refresh_title()
         self.setWindowIcon(app_icon())
         self.resize(1100, 800)
         self.setMinimumSize(920, 640)
-        # 导航文字在较窄窗口也常显（避免只剩图标、看不清功能）
+        # 导航栏：展开态默认 260px（不再挡住右侧界面），并支持拖拽右侧边缘调宽
         try:
-            self.navigationInterface.setExpandWidth(680)
+            saved_w = int(QSettings("TangdouDownloader", "TangdouDownloader").value("nav_width", 260) or 260)
+            self.navigationInterface.apply_width(saved_w)
+            self.navigationInterface.setMinimumExpandWidth(700)  # 窄窗口下文字也常显
         except Exception:
             pass
 
@@ -315,6 +404,11 @@ class MainWindow(FluentWindow):
 
         self._build_pages()
         self._build_navigation()
+        # 启动即展开为窄导航（文字常显、不遮内容；点菜单按钮可收起为纯图标）
+        try:
+            self.navigationInterface.expand(False)
+        except Exception:
+            pass
         self._load_settings()
         self._setup_tray()
         self._update_task_count()
@@ -456,6 +550,7 @@ class MainWindow(FluentWindow):
         v.addWidget(SubtitleLabel("歌名搜索"))
 
         row = QHBoxLayout()
+        row.setSpacing(8)
         row.addWidget(BodyLabel("歌名:"))
         self.edit_song = SearchLineEdit()
         self.edit_song.setPlaceholderText("例如：最炫民族风")
@@ -467,7 +562,9 @@ class MainWindow(FluentWindow):
         row.addWidget(self.btn_search)
         v.addLayout(row)
 
-        v.addWidget(BodyLabel("搜索结果（🎬 糖豆 / 📺 B站 = 可自动下载；🔗 全网 = 参考链接）："))
+        label_results = BodyLabel("搜索结果（🎬 糖豆 / 📺 B站 = 可自动下载；🔗 全网 = 参考链接）：")
+        label_results.setWordWrap(True)
+        v.addWidget(label_results)
         self.list_results = ListWidget()
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         v.addWidget(self.list_results, 1)
@@ -480,7 +577,9 @@ class MainWindow(FluentWindow):
         v.addLayout(row2)
 
         v.addSpacing(6)
-        v.addWidget(BodyLabel("自动搜索无结果时：在糖豆 App 搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到下面："))
+        label_paste_hint = BodyLabel("自动搜索无结果时：在糖豆 App 搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到下面：")
+        label_paste_hint.setWordWrap(True)
+        v.addWidget(label_paste_hint)
         self.edit_paste = QPlainTextEdit()
         self.edit_paste.setPlaceholderText("粘贴 App 分享链接，每行一个")
         self.edit_paste.setMaximumHeight(80)

@@ -131,3 +131,25 @@ def test_check_update_anti_double_click(win):
 
 def test_version_key():
     assert g.version_key("v1.2.0") == (1, 2, 0)
+
+
+def test_nav_startup_expanded_slim(win):
+    """启动即展开为窄导航（不遮挡右侧内容区）。"""
+    QApplication.instance().processEvents()  # 让 hBoxLayout 完成重排
+    nav = win.navigationInterface
+    assert nav.panel.displayMode.name == "EXPAND"
+    assert 180 <= nav.panel.width() <= 480
+    # 内容区不被导航遮挡：导航宽 + 内容宽 ≈ 窗口宽
+    assert win.stackedWidget.width() + nav.width() <= win.width() + 5
+
+
+def test_nav_drag_resize_persists(win):
+    """拖动调宽后写入 QSettings，供下次启动恢复。"""
+    nav = win.navigationInterface
+    nav._set_nav_width(340)
+    win.settings.sync()
+    assert nav.panel.width() == 340
+    assert nav.panel.expandWidth == 340
+    nav._save_width()
+    win.settings.sync()
+    assert int(win.settings.value("nav_width")) == 340
