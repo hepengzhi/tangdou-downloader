@@ -25,7 +25,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tdcore as td  # 核心逻辑包（api/download/search/log）
 
-from PySide6.QtCore import Qt, QThread, QSettings, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QSettings, QObject, Signal, Slot
 from PySide6.QtGui import QFont, QColor, QBrush, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
@@ -206,16 +206,30 @@ class SearchWorker(QThread):
         self.search_done.emit(results)
 
 
-class UpdateChecker(QThread):
-    """GitHub Release 自动更新检查。"""
+class _UpdateSignals(QObject):
+    """更新检查的信号桥（普通线程安全地向主线程发射 Qt 信号）。"""
     found = Signal(str, str, str)       # tag, download_url, body
 
+
+class UpdateChecker:
+    """GitHub Release 自动更新检查（普通线程，避免 QThread 生命周期问题）。"""
+
     def __init__(self, repo, current, parent=None):
-        super().__init__(parent)
         self.repo = repo
         self.current = current
+        self.signals = _UpdateSignals(parent) if parent is not None else _UpdateSignals()
+        self._t = threading.Thread(target=self._run, daemon=True)
 
-    def run(self):
+    def start(self):
+        self._t.start()
+
+    def isRunning(self):
+        return self._t.is_alive()
+
+    def wait(self, ms=3000):
+        self._t.join(timeout=ms / 1000.0)
+
+    def _run(self):
         try:
             url = f"https://api.github.com/repos/{self.repo}/releases/latest"
             req = urllib.request.Request(url, headers={"User-Agent": "tangdou-downloader"})
@@ -225,7 +239,7 @@ class UpdateChecker(QThread):
             if tag and version_key(tag) > version_key(self.current):
                 assets = j.get("assets") or []
                 dl = assets[0]["browser_download_url"] if assets else (j.get("html_url") or "")
-                self.found.emit(tag, dl, (j.get("body") or "")[:500])
+                self.signals.found.emit(tag, dl, (j.get("body") or "")[:500])
         except Exception:
             pass  # 网络失败/无新版：静默
 
@@ -630,7 +644,7 @@ class MainWindow(QMainWindow):
     # ---------------- 自动更新 ----------------
     def _check_update(self):
         self._update_worker = UpdateChecker(REPO, VERSION, self)
-        self._update_worker.found.connect(self._on_update_found)
+        self._update_worker.signals.found.connect(self._on_update_found)
         self._update_worker.start()
 
     @Slot(str, str, str)
