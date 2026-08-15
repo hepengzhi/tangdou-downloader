@@ -43,7 +43,7 @@ from qfluentwidgets import (
     InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -292,7 +292,8 @@ class DownloadWorker(QThread):
 class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"糖豆广场舞下载器 v{VERSION}")
+        self._latest_tag = None  # 检测到的新版本（用于标题栏提示）
+        self._refresh_title()
         self.setWindowIcon(app_icon())
         self.resize(1020, 780)
         self.setMinimumSize(780, 580)
@@ -689,6 +690,19 @@ class MainWindow(FluentWindow):
                      position=InfoBarPosition.TOP_RIGHT, duration=2500)
         self._check_update(manual=True)
 
+    def _refresh_title(self):
+        """窗口标题：检测到新版本时在标题栏显著提示。"""
+        if self._latest_tag:
+            self.setWindowTitle(f"糖豆广场舞下载器 v{VERSION} ⬆ 有新版 {self._latest_tag}")
+        else:
+            self.setWindowTitle(f"糖豆广场舞下载器 v{VERSION}")
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tip = f"糖豆广场舞下载器 v{VERSION}"
+            if self._latest_tag:
+                tip += f" ⬆ 有新版 {self._latest_tag}"
+            tray.setToolTip(tip)
+
     @Slot(bool, str, str, int, str)
     def _on_update_result(self, is_newer, tag, url, size, body, manual=False):
         if not is_newer:
@@ -697,6 +711,8 @@ class MainWindow(FluentWindow):
                                 position=InfoBarPosition.TOP_RIGHT, duration=3000)
             return
         self.log(f"发现新版本 {tag}（当前 {VERSION}）")
+        self._latest_tag = tag
+        self._refresh_title()  # 标题栏常驻提示
         self._notify("发现新版本", f"{tag}（当前 {VERSION}）", QSystemTrayIcon.Information)
         box = QMessageBox(self)
         box.setWindowTitle("发现新版本")
