@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 糖豆广场舞下载器 - 图形界面 (tangdou_gui.py)
@@ -42,7 +42,7 @@ from qfluentwidgets import (
     InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 REPO = "hepengzhi/tangdou-downloader"
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
@@ -56,26 +56,45 @@ STATUS_COLORS = {
     STATUS_FAIL: QColor("#eb5757"),
 }
 
-# 数据类控件样式（palette 自适应浅/深主题）
-DATA_QSS = """
+# 数据类控件样式（随主题切换；不能用 palette()，因 qfluentwidgets 只改样式表不改 QPalette）
+DATA_QSS_LIGHT = """
 QGroupBox {
-    border: 1px solid palette(mid); border-radius: 8px; margin-top: 12px;
-    background: palette(window); font-weight: bold;
+    border: 1px solid #d9dee5; border-radius: 8px; margin-top: 12px;
+    background: #fbfcfe; font-weight: bold;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; color: #344054; }
 QPlainTextEdit {
-    border: 1px solid palette(mid); border-radius: 8px; padding: 6px 8px;
-    background: palette(base); color: palette(text);
-    selection-background-color: rgba(47, 128, 237, 0.35);
+    border: 1px solid #d0d7e2; border-radius: 8px; padding: 6px 8px;
+    background: #ffffff; color: #1f2937; selection-background-color: rgba(47, 128, 237, 0.35);
 }
 QPlainTextEdit:focus { border-color: #2f80ed; }
-QTableWidget, QListWidget { background: palette(base); color: palette(text); }
+QTableWidget, QListWidget { background: #ffffff; color: #1f2937; }
 QHeaderView::section {
-    background: palette(button); color: palette(text); border: none;
-    border-bottom: 1px solid palette(mid); padding: 6px 8px; font-weight: bold;
+    background: #f2f5f9; color: #344054; border: none;
+    border-bottom: 1px solid #d0d7e2; padding: 6px 8px; font-weight: bold;
 }
-QMenu { background: palette(window); color: palette(text); }
-QMenu::item:selected { background: rgba(47, 128, 237, 0.25); }
+QMenu { background: #ffffff; color: #1f2937; }
+QMenu::item:selected { background: #e8f1fd; }
+"""
+
+DATA_QSS_DARK = """
+QGroupBox {
+    border: 1px solid #3a3f47; border-radius: 8px; margin-top: 12px;
+    background: #292929; font-weight: bold;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; color: #e0e0e0; }
+QPlainTextEdit {
+    border: 1px solid #3a3f47; border-radius: 8px; padding: 6px 8px;
+    background: #202020; color: #e0e0e0; selection-background-color: rgba(47, 128, 237, 0.5);
+}
+QPlainTextEdit:focus { border-color: #5b9cf5; }
+QTableWidget, QListWidget { background: #202020; color: #e0e0e0; }
+QHeaderView::section {
+    background: #2a2a2a; color: #c0c8d0; border: none;
+    border-bottom: 1px solid #3a3f47; padding: 6px 8px; font-weight: bold;
+}
+QMenu { background: #2b2b2b; color: #e0e0e0; }
+QMenu::item:selected { background: rgba(47, 128, 237, 0.4); }
 """
 
 
@@ -600,7 +619,7 @@ class MainWindow(FluentWindow):
     def _apply_theme(self):
         setTheme(Theme.DARK if self._dark else Theme.LIGHT)
         setThemeColor("#2f80ed")
-        self.setStyleSheet(DATA_QSS)
+        self.setStyleSheet(DATA_QSS_DARK if self._dark else DATA_QSS_LIGHT)
 
     # ---------------- 自动更新 ----------------
     def start_update_check(self):
