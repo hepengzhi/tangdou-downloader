@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 糖豆广场舞下载器 - 图形界面 (tangdou_gui.py)
@@ -18,6 +18,7 @@
 import concurrent.futures
 import json
 import os
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -42,8 +43,9 @@ from qfluentwidgets import (
     InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 REPO = "hepengzhi/tangdou-downloader"
+version_key = td.updater.version_key  # 供测试/兼容引用
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
 K_VIDEO, K_MP3, K_BILI = "video", "mp3", "bili"
@@ -140,7 +142,7 @@ class SearchWorker(QThread):
 class _UpdateSignals(QObject):
     """更新检查的信号桥（普通线程安全地向主线程发射 Qt 信号）。
     不挂 parent：即使窗口先销毁，线程发射也是安全的（接收方销毁时连接自动断开）。"""
-    found = Signal(str, str, str)       # tag, download_url, body
+    result = Signal(bool, str, str, int, str)  # is_newer, tag, url, size, body
 
 
 class UpdateChecker:
@@ -149,7 +151,7 @@ class UpdateChecker:
     def __init__(self, repo, current, parent=None):
         self.repo = repo
         self.current = current
-        self.signals = _UpdateSignals()   # 无 parent，独立存活
+        self.signals = _UpdateSignals()
         self._t = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
@@ -162,18 +164,58 @@ class UpdateChecker:
         self._t.join(timeout=ms / 1000.0)
 
     def _run(self):
+        info = td.updater.latest_release(self.repo)
+        if not info:
+            self.signals.result.emit(False, "", "", 0, "")
+            return
+        newer = td.updater.is_newer(info["tag"], self.current)
+        self.signals.result.emit(newer, info["tag"], info["url"], info["size"], info["body"])
+
+
+class UpdateDownloadWorker(QThread):
+    """在线更新：后台下载新版 exe（可取消）。"""
+    progress = Signal(int, int)          # done, total
+    done = Signal(str, bool, str)        # dest, ok, error
+
+    def __init__(self, url, dest, expected_size=0, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.dest = dest
+        self.expected_size = expected_size
+        self._stop = threading.Event()
+
+    def cancel(self):
+        self._stop.set()
+
+    def run(self):
+        ok = False
+        err = ""
         try:
-            url = f"https://api.github.com/repos/{self.repo}/releases/latest"
-            req = urllib.request.Request(url, headers={"User-Agent": "tangdou-downloader"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                j = json.loads(resp.read().decode("utf-8"))
-            tag = j.get("tag_name") or ""
-            if tag and version_key(tag) > version_key(self.current):
-                assets = j.get("assets") or []
-                dl = assets[0]["browser_download_url"] if assets else (j.get("html_url") or "")
-                self.signals.found.emit(tag, dl, (j.get("body") or "")[:500])
-        except Exception:
-            pass  # 网络失败/无新版：静默
+            def _prog(d, t):
+                if self._stop.is_set():
+                    raise KeyboardInterrupt
+                self.progress.emit(d, t)
+
+            ok = td.download(self.url, self.dest, log=lambda m: None,
+                             progress=_prog,
+                             headers={"User-Agent": "tangdou-downloader",
+                                      "Referer": "https://github.com/"})
+            if ok and self.expected_size:
+                real = os.path.getsize(self.dest)
+                if abs(real - self.expected_size) > max(1024, self.expected_size * 0.02):
+                    ok = False
+                    err = f"文件大小不符（{real}/{self.expected_size}）"
+        except KeyboardInterrupt:
+            err = "已取消"
+            ok = False
+        except Exception as e:
+            err = str(e)
+        if not ok and os.path.exists(self.dest):
+            try:
+                os.remove(self.dest)
+            except Exception:
+                pass
+        self.done.emit(self.dest, ok, err)
 
 
 class DownloadWorker(QThread):
@@ -632,32 +674,125 @@ class MainWindow(FluentWindow):
         """启动后延迟自动检查更新（避免与窗口初始化竞争）。"""
         self._check_update()
 
-    def _check_update(self):
+    def _check_update(self, manual=False):
         if self._update_worker and self._update_worker.isRunning():
             return
         self._update_worker = UpdateChecker(REPO, VERSION, self)
-        self._update_worker.signals.found.connect(self._on_update_found)
+        self._update_worker.signals.result.connect(
+            lambda *a: self._on_update_result(*a, manual=manual))
         self._update_worker.start()
 
     @Slot()
     def check_update_now(self):
         self.log("正在检查更新…")
-        self._check_update()
-        InfoBar.info("已请求检查更新", "若有新版本会弹出提示", parent=self.setting_page,
-                     position=InfoBarPosition.TOP_RIGHT, duration=3000)
+        InfoBar.info("正在检查更新", "请稍候…", parent=self.setting_page,
+                     position=InfoBarPosition.TOP_RIGHT, duration=2500)
+        self._check_update(manual=True)
 
-    @Slot(str, str, str)
-    def _on_update_found(self, tag, url, body):
+    @Slot(bool, str, str, int, str)
+    def _on_update_result(self, is_newer, tag, url, size, body, manual=False):
+        if not is_newer:
+            if manual:
+                InfoBar.success("已是最新版本", f"当前 v{VERSION}", parent=self.setting_page,
+                                position=InfoBarPosition.TOP_RIGHT, duration=3000)
+            return
         self.log(f"发现新版本 {tag}（当前 {VERSION}）")
         self._notify("发现新版本", f"{tag}（当前 {VERSION}）", QSystemTrayIcon.Information)
         box = QMessageBox(self)
         box.setWindowTitle("发现新版本")
         box.setText(f"检测到新版本 <b>{tag}</b>（当前 {VERSION}）\n\n{body[:200]}")
-        btn_dl = box.addButton("去下载", QMessageBox.AcceptRole)
+        btn_up = box.addButton("立即更新", QMessageBox.AcceptRole)
         box.addButton("稍后再说", QMessageBox.RejectRole)
         box.exec()
-        if box.clickedButton() is btn_dl and url:
-            webbrowser.open(url)
+        if box.clickedButton() is btn_up and url:
+            self._start_update_download(url, size)
+
+    # ---------------- 在线更新：下载 + 安装 ----------------
+    def _start_update_download(self, url, size):
+        from PySide6.QtWidgets import QDialog, QLabel, QDialogButtonBox
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        updir = os.path.join(base, "TangdouDownloader", "update")
+        os.makedirs(updir, exist_ok=True)
+        dest = os.path.join(updir, "TangdouDownloader.exe.new")
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("正在下载更新")
+        dlg.setMinimumWidth(420)
+        lay = QVBoxLayout(dlg)
+        lbl = QLabel(f"正在下载新版本（约 {size/1048576:.1f} MB）…")
+        lay.addWidget(lbl)
+        bar = ProgressBar()
+        bar.setRange(0, 100)
+        lay.addWidget(bar)
+        btns = QDialogButtonBox(QDialogButtonBox.Cancel)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        self._update_dl = UpdateDownloadWorker(url, dest, size, self)
+        self._update_dl.progress.connect(lambda d, t: self._on_dl_progress(d, t, bar, lbl))
+        self._update_dl.done.connect(lambda *a: self._on_dl_done(dlg, *a))
+        self._update_dl.finished.connect(dlg.accept)
+        self._update_dl.start()
+        dlg.exec()
+
+    def _on_dl_progress(self, done, total, bar, lbl):
+        if total > 0:
+            pct = int(done * 100 / total)
+            bar.setValue(pct)
+            lbl.setText(f"正在下载更新… {done/1048576:.1f}/{total/1048576:.1f} MB")
+        else:
+            bar.setValue(0)
+            lbl.setText(f"正在下载更新… {done/1048576:.1f} MB")
+
+    @Slot(str, bool, str)
+    def _on_dl_done(self, dlg, dest, ok, err):
+        if not ok:
+            self.log(f"更新下载失败: {err}")
+            InfoBar.error("更新失败", err or "未知错误", parent=self.link_page,
+                          position=InfoBarPosition.TOP_RIGHT, duration=5000)
+            dlg.reject()
+            return
+        self.log("更新下载完成，准备安装…")
+        self._install_update(dest)
+
+    def _install_update(self, new_exe):
+        """替换当前程序。打包版(exe)：写 bat 自替换后重启；源码版：保存到 Downloads。"""
+        if getattr(sys, "frozen", False) and os.path.exists(sys.executable):
+            exe = sys.executable
+            bat = os.path.join(os.path.dirname(exe), "update_tangdou.bat")
+            try:
+                with open(bat, "w", encoding="utf-8") as f:
+                    f.write(
+                        "@echo off\r\n"
+                        "timeout /t 2 /nobreak >nul\r\n"
+                        ":loop\r\n"
+                        f'tasklist /fi "imagename eq {os.path.basename(exe)}" | find /i "{os.path.basename(exe)}" >nul\r\n'
+                        "if %errorlevel%==0 ( timeout /t 1 /nobreak >nul & goto loop )\r\n"
+                        f'move /y "{new_exe}" "{exe}" >nul\r\n'
+                        f'start "" "{exe}"\r\n'
+                        "del \"%~f0\"\r\n"
+                    )
+                subprocess.Popen(["cmd", "/c", "start", "", bat],
+                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
+                self.log("已开始在线更新：程序将自动重启，请稍候…")
+                QMessageBox.information(self, "更新完成",
+                                        "新版本已下载，程序即将自动重启完成更新。")
+                self._save_settings()
+                QApplication.instance().quit()
+                return
+            except Exception as e:
+                self.log(f"自动安装失败({e})，改为保存到下载目录")
+        # 源码运行 / 兜底：保存到 Downloads
+        try:
+            dst = os.path.join(td.default_download_dir(), "TangdouDownloader.exe")
+            import shutil
+            shutil.move(new_exe, dst)
+            os.startfile(os.path.dirname(dst))
+            InfoBar.success("更新已下载", f"已保存到 {dst}\n（源码运行版无法自动替换，请手动替换后重启）",
+                            parent=self.link_page, position=InfoBarPosition.TOP_RIGHT, duration=6000)
+        except Exception as e:
+            InfoBar.error("保存失败", str(e), parent=self.link_page,
+                          position=InfoBarPosition.TOP_RIGHT, duration=5000)
 
     # ---------------- 工具方法 ----------------
     def log(self, text):

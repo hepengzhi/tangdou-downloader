@@ -136,6 +136,54 @@ def test_bilibili_error_propagates(monkeypatch):
         pass
 
 
+# ---------- 在线更新 ----------
+
+def test_updater_version_key():
+    from tdcore.updater import version_key, is_newer
+    assert version_key("v1.4.0") == (1, 4, 0)
+    assert version_key("v1.10.0") > version_key("v1.9.0")
+    assert is_newer("v1.5.0", "1.4.0")
+    assert not is_newer("v1.4.0", "1.5.0")
+    assert not is_newer("", "1.5.0")
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self._text = text
+
+    def read(self):
+        return self._text.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_updater_latest_release(monkeypatch):
+    """latest_release 解析与失败兜底（离线 mock）。"""
+    import json
+    import tdcore.updater as up
+    fake = {
+        "tag_name": "v9.9.9",
+        "body": "更新说明",
+        "assets": [{"name": "x.exe", "browser_download_url": "https://x/x.exe", "size": 123456}],
+    }
+    monkeypatch.setattr(up.urllib.request, "urlopen",
+                        lambda req, timeout=10: _FakeResp(json.dumps(fake)))
+    info = up.latest_release("a/b")
+    assert info["tag"] == "v9.9.9"
+    assert info["url"] == "https://x/x.exe"
+    assert info["size"] == 123456
+
+    def boom(*a, **k):
+        raise OSError("网络错误")
+
+    monkeypatch.setattr(up.urllib.request, "urlopen", boom)
+    assert up.latest_release("a/b") is None
+
+
 # ---------- 日志 ----------
 
 def test_setup_log_file_idempotent():
