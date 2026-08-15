@@ -42,11 +42,11 @@ from qfluentwidgets import (
     InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 REPO = "hepengzhi/tangdou-downloader"
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
-K_VIDEO, K_MP3 = "video", "mp3"
+K_VIDEO, K_MP3, K_BILI = "video", "mp3", "bili"
 
 # 状态列配色
 STATUS_COLORS = {
@@ -130,7 +130,7 @@ class SearchWorker(QThread):
 
     def run(self):
         try:
-            results = td.sogou_search(self.keyword)
+            results = td.search_all(self.keyword)
         except Exception as e:
             self.search_log.emit(f"搜索出错: {e}")
             results = []
@@ -212,6 +212,12 @@ class DownloadWorker(QThread):
                     key, self.outdir,
                     want_audio=self.want_audio,
                     quality=self.quality,
+                    log=self.log.emit,
+                    progress=lambda d, t: self._progress(key, d, t),
+                )
+            elif kind == K_BILI:
+                ok, mp4, mp3 = td.bilibili.download_video_bili(
+                    key, self.outdir,
                     log=self.log.emit,
                     progress=lambda d, t: self._progress(key, d, t),
                 )
@@ -392,7 +398,7 @@ class MainWindow(FluentWindow):
         row.addWidget(self.btn_search)
         v.addLayout(row)
 
-        v.addWidget(BodyLabel("搜索结果（🎬 糖豆站内 = 可自动下载；🔗 全网 = 参考链接）："))
+        v.addWidget(BodyLabel("搜索结果（🎬 糖豆 / 📺 B站 = 可自动下载；🔗 全网 = 参考链接）："))
         self.list_results = ListWidget()
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         v.addWidget(self.list_results, 1)
@@ -762,46 +768,55 @@ class MainWindow(FluentWindow):
         self.btn_search.setEnabled(True)
         self.btn_search.setText("搜索")
         self.list_results.clear()
-        tangdou_n = sum(1 for r in results if r.get("vid"))
-        others_n = len(results) - tangdou_n
+        td_n = sum(1 for r in results if r.get("source") == "tangdou")
+        bili_n = sum(1 for r in results if r.get("source") == "bili")
+        others_n = len(results) - td_n - bili_n
         if results:
             for r in results:
                 li = QListWidgetItem()
-                if r.get("vid"):
+                src = r.get("source")
+                if src == "tangdou":
                     li.setText(f"🎬 糖豆 [{r['vid']}] {r['title']}")
                     li.setData(Qt.UserRole, r["vid"])
+                    li.setData(Qt.UserRole + 1, K_VIDEO)
+                elif src == "bili":
+                    li.setText(f"📺 B站 [{r['bvid']}] {r['title']}")
+                    li.setData(Qt.UserRole, r["bvid"])
+                    li.setData(Qt.UserRole + 1, K_BILI)
+                    li.setToolTip(f"UP主: {r.get('author','')} 播放: {r.get('play','')} 时长: {r.get('duration','')}")
                 else:
                     li.setText(f"🔗 全网: {r['title']}")
                     li.setData(Qt.UserRole, None)
                     li.setFlags(li.flags() & ~Qt.ItemIsSelectable)
                     li.setToolTip(r.get("url") or "")
                 self.list_results.addItem(li)
-            msg = f"糖豆站内 {tangdou_n} 个（可下载）+ 全网参考 {others_n} 条"
+            msg = f"可下载：糖豆 {td_n} + B站 {bili_n}，全网参考 {others_n} 条"
             self._set_status(msg)
-            self.log(f"搜索结果：糖豆 {tangdou_n} 条（自动下载），全网参考 {others_n} 条")
+            self.log(f"搜索结果：糖豆 {td_n} + B站 {bili_n}（可下载），全网参考 {others_n} 条")
         else:
-            self._set_status("全网未搜到该歌名的广场舞视频，请在糖豆 App 搜索后粘贴分享链接")
+            self._set_status("未搜到结果，请在糖豆 App 搜索歌名后粘贴分享链接")
             self.log("未搜到结果。糖豆官网搜索已下线，请在糖豆 App 搜索歌名 → 分享 → 复制链接 → 粘贴到下方输入框。")
 
     @Slot()
     def add_selected_results(self):
         items = self.list_results.selectedItems()
         if not items:
-            QMessageBox.information(self, "提示", "请先在搜索结果里选择要下载的糖豆视频（🎬 项）")
+            QMessageBox.information(self, "提示", "请先在搜索结果里选择可下载的视频（🎬 糖豆 / 📺 B站 项）")
             return
         added = 0
         for it in items:
-            vid = it.data(Qt.UserRole)
-            if not vid:
+            key = it.data(Qt.UserRole)
+            kind = it.data(Qt.UserRole + 1)
+            if not key or kind not in (K_VIDEO, K_BILI):
                 continue
             text = it.text()
-            title = text.split("] ", 1)[-1] if "] " in text else vid
-            self._add_row(vid, title, K_VIDEO)
+            title = text.split("] ", 1)[-1] if "] " in text else key
+            self._add_row(key, title, kind)
             added += 1
         if added:
-            self._set_status(f"已加入 {added} 个糖豆下载任务")
+            self._set_status(f"已加入 {added} 个下载任务（糖豆/B站）")
         else:
-            QMessageBox.information(self, "提示", "请选择 🎬 糖豆 开头的项（全网参考链接不支持自动下载）")
+            QMessageBox.information(self, "提示", "请选择 🎬 糖豆 或 📺 B站 开头的项（全网参考链接不支持自动下载）")
 
     @Slot()
     def add_related(self):

@@ -19,14 +19,15 @@ from .api import (
 )
 
 
-def download(url, dest, timeout=60, retries=3, log=print, progress=None, resume=True):
+def download(url, dest, timeout=60, retries=3, log=print, progress=None, resume=True, headers=None):
     """带 Referer、重试与断点续传的文件下载，返回是否成功。
-    resume: 支持断点续传（写入 dest+".part"，成功后改名）。"""
+    resume: 支持断点续传（写入 dest+".part"，成功后改名）。
+    headers: 自定义请求头（默认糖豆的 Referer；B 站等源传自己的）。"""
     part = dest + ".part"
     for attempt in range(1, retries + 1):
         start = os.path.getsize(part) if resume and os.path.exists(part) else 0
         mode = "ab" if start > 0 else "wb"
-        hdrs = dict(HEADERS_DL)
+        hdrs = dict(headers if headers is not None else HEADERS_DL)
         if start > 0:
             hdrs["Range"] = f"bytes={start}-"
         try:

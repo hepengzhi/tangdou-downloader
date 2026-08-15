@@ -1,12 +1,54 @@
 # -*- coding: utf-8 -*-
-"""歌名搜索：全网搜索（糖豆优先）+ 交互式兜底下载。"""
+"""歌名搜索：全网搜索（糖豆优先 + B 站可下载源）+ 交互式兜底下载。"""
 import re
 import time
 import urllib.parse
 import urllib.request
 
 from .api import extract_vid
+from .bilibili import extract_bvid, search as bili_search
 from .download import download_video
+
+
+def search_all(keyword, limit=15):
+    """合并多源搜索：糖豆站内(经搜狗) + B 站可下载源 + 全网参考。
+    返回 [{title, url, vid, bvid, source}]：
+      source = "tangdou"(可下载) / "bili"(可下载) / "web"(仅参考)"""
+    results = []
+    seen = set()
+    # 1) 搜狗：糖豆站内 + 全网参考（含 B 站链接时补提取 bvid）
+    for r in sogou_search(keyword):
+        bvid = extract_bvid(r.get("url") or "")
+        if r.get("vid"):
+            r["source"] = "tangdou"
+            key = "td:" + r["vid"]
+        elif bvid:
+            r["source"] = "bili"
+            r["bvid"] = bvid
+            key = "bili:" + bvid
+        else:
+            r["source"] = "web"
+            key = "url:" + r.get("url", "")[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(r)
+    # 2) 直接查 B 站（保证有可下载结果）
+    try:
+        for it in bili_search(keyword, limit=limit):
+            key = "bili:" + it["bvid"]
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "title": it["title"], "url": f"https://www.bilibili.com/video/{it['bvid']}",
+                "vid": None, "bvid": it["bvid"], "source": "bili",
+                "author": it.get("author"), "play": it.get("play"),
+                "duration": it.get("duration"),
+            })
+    except Exception:
+        pass  # B 站搜索失败不影响其它源
+    return results
 
 
 def sogou_search(keyword):
@@ -71,28 +113,36 @@ def sogou_search(keyword):
 
 def song_mode(keyword, outdir, want_audio, quality, log=print, clip=None):
     log(f"\n== 搜索歌名: {keyword} ==")
-    results = sogou_search(keyword)
-    tangdou_items = [r for r in results if r.get("vid")]
-    others = [r for r in results if not r.get("vid")]
+    results = search_all(keyword)
+    tangdou_items = [r for r in results if r.get("source") == "tangdou"]
+    bili_items = [r for r in results if r.get("source") == "bili"]
+    others = [r for r in results if r.get("source") == "web"]
 
-    if tangdou_items:
-        log(f"搜索到 {len(tangdou_items)} 个糖豆站内视频，可直接下载：")
-        for i, r in enumerate(tangdou_items, 1):
-            log(f"  {i}. [{r['vid']}] {r['title']}")
+    downloadables = tangdou_items + bili_items
+    if downloadables:
+        log(f"搜索到 {len(downloadables)} 个可下载视频（糖豆 {len(tangdou_items)} 个 + B站 {len(bili_items)} 个）：")
+        for i, r in enumerate(downloadables, 1):
+            tag = "糖豆" if r.get("source") == "tangdou" else "B站"
+            key = r.get("vid") or r.get("bvid")
+            log(f"  {i}. [{tag} {key}] {r['title']}")
         try:
             choice = input("输入序号下载（直接回车=全部，0=不下载）: ").strip()
         except EOFError:
             choice = "0"
         if choice == "":
-            chosen = tangdou_items
+            chosen = downloadables
         elif choice == "0":
             chosen = []
         else:
-            chosen = [tangdou_items[int(choice) - 1]]
+            chosen = [downloadables[int(choice) - 1]]
         for r in chosen:
-            download_video(r["vid"], outdir, want_audio, quality, log=log, clip=clip)
+            if r.get("source") == "tangdou":
+                download_video(r["vid"], outdir, want_audio, quality, log=log, clip=clip)
+            else:
+                from .bilibili import download_video_bili
+                download_video_bili(r["bvid"], outdir, log=log)
     else:
-        log("未找到糖豆站内视频（糖豆官网搜索已下线，站内视频未被搜索引擎收录）。")
+        log("未找到糖豆/B站站内视频（糖豆官网搜索已下线，站内视频未被搜索引擎收录）。")
         log("请按下面步骤操作一次，之后全部自动：")
         log("  1) 手机打开「糖豆」App，搜索歌名")
         log("  2) 点开想要的视频 → 分享 → 复制链接")

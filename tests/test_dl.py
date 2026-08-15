@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """tdcore 核心逻辑单元测试（纯离线，不依赖网络）。"""
 import os
 
@@ -86,6 +86,54 @@ def test_resolve_qualities(monkeypatch):
     q = td.resolve_qualities(url)
     assert "H720P" in q
     assert q["H720P"] == "https://x/wz/1_H720P.mp4?sign=a"
+
+
+# ---------- B 站源 ----------
+
+def test_extract_bvid():
+    from tdcore.bilibili import extract_bvid
+    assert extract_bvid("https://www.bilibili.com/video/BV1vy4y17762") == "BV1vy4y17762"
+    assert extract_bvid("BV14X4y1c75k 任意文本") == "BV14X4y1c75k"
+    assert extract_bvid("https://www.tangdou.com/play/?vid=123") is None
+
+
+def test_search_all_marks_sources(monkeypatch):
+    """search_all 对搜狗与 B 站结果打来源标记（离线 mock）。"""
+    import tdcore.search as s
+    monkeypatch.setattr(s, "sogou_search", lambda kw: [
+        {"title": "糖豆视频", "url": "https://www.tangdou.com/play/?vid=20000002258422", "vid": "20000002258422"},
+        {"title": "B站视频", "url": "https://www.bilibili.com/video/BV1vy4y17762", "vid": None},
+        {"title": "其它站", "url": "https://v.qq.com/x/page/a.html", "vid": None},
+    ])
+    monkeypatch.setattr(s, "bili_search", lambda kw, limit=15: [
+        {"bvid": "BV1vy4y17762", "title": "B站视频", "author": "A", "play": 1, "duration": "1:00"},
+        {"bvid": "BV1aaaaaaa1", "title": "另一个", "author": "B", "play": 2, "duration": "2:00"},
+    ])
+    rs = s.search_all("歌名")
+    src = {r["source"] for r in rs}
+    assert "tangdou" in src and "bili" in src and "web" in src
+    assert sum(1 for r in rs if r["source"] == "bili") == 2
+
+
+def test_bilibili_get_video_info_parsing(monkeypatch):
+    from tdcore import bilibili
+    monkeypatch.setattr(bilibili, "_get_json",
+                        lambda url, headers=None, retries=2: {"code": 0, "data": {
+                            "title": "测试视频", "cid": 12345, "duration": 120, "pages": []}})
+    info = bilibili.get_video_info("BV1vy4y17762")
+    assert info["cid"] == 12345
+    assert info["title"] == "测试视频"
+
+
+def test_bilibili_error_propagates(monkeypatch):
+    from tdcore import bilibili
+    monkeypatch.setattr(bilibili, "_get_json",
+                        lambda url, headers=None, retries=2: {"code": -403, "message": "访问权限不足"})
+    try:
+        bilibili.get_video_info("BV1vy4y17762")
+        assert False, "应抛出 BilibiliError"
+    except bilibili.BilibiliError:
+        pass
 
 
 # ---------- 日志 ----------
