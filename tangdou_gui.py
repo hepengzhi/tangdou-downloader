@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPlainTextEdit, QFileDialog, QTableWidgetItem, QProgressBar, QListWidgetItem,
     QAbstractItemView, QMessageBox, QSplitter, QMenu, QSystemTrayIcon, QGroupBox,
+    QLabel,
 )
 from qfluentwidgets import (
     FluentWindow, FluentIcon, NavigationItemPosition,
@@ -43,7 +44,7 @@ from qfluentwidgets import (
     InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -295,8 +296,13 @@ class MainWindow(FluentWindow):
         self._latest_tag = None  # 检测到的新版本（用于标题栏提示）
         self._refresh_title()
         self.setWindowIcon(app_icon())
-        self.resize(1020, 780)
-        self.setMinimumSize(780, 580)
+        self.resize(1100, 800)
+        self.setMinimumSize(920, 640)
+        # 导航文字在较窄窗口也常显（避免只剩图标、看不清功能）
+        try:
+            self.navigationInterface.setExpandWidth(680)
+        except Exception:
+            pass
 
         self._worker = None
         self._search_worker = None
@@ -313,6 +319,7 @@ class MainWindow(FluentWindow):
         self._setup_tray()
         self._update_task_count()
         self._set_status("就绪")
+        QTimer.singleShot(1500, self._maybe_show_tutorial)
 
     # ---------------- 页面构建 ----------------
     def _build_pages(self):
@@ -379,6 +386,25 @@ class MainWindow(FluentWindow):
         self.table.customContextMenuRequested.connect(self._on_table_menu)
         self.table.cellDoubleClicked.connect(self._on_table_double_click)
         gv.addWidget(self.table)
+
+        # 空态引导（任务为 0 时覆盖在表格上）
+        self._empty_hint = QLabel(
+            "暂无任务\n\n"
+            "① 在「链接下载」页粘贴糖豆分享链接 / vid\n"
+            "② 或去「歌名搜索」按歌名找视频\n"
+            "③ 手机糖豆 App：搜歌名 → 分享 → 复制链接，粘贴即可",
+            self.table)
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setWordWrap(True)
+        self._empty_hint.setStyleSheet(
+            "color: #8a8f98; font-size: 11pt; background: transparent;")
+        _table_resize = self.table.resizeEvent
+
+        def _resize(e):
+            self._empty_hint.setGeometry(self.table.rect())
+            _table_resize(e)
+
+        self.table.resizeEvent = _resize
 
         row_btns = QHBoxLayout()
         row_btns.setSpacing(8)
@@ -565,9 +591,9 @@ class MainWindow(FluentWindow):
         self._ver_label = BodyLabel(f"糖豆广场舞下载器 v{VERSION}")
         g2.addWidget(self._ver_label)
         r4 = QHBoxLayout()
-        btn_update = PrimaryPushButton("检查更新")
-        btn_update.clicked.connect(self.check_update_now)
-        r4.addWidget(btn_update)
+        self.btn_check_update = PrimaryPushButton("检查更新")
+        self.btn_check_update.clicked.connect(self.check_update_now)
+        r4.addWidget(self.btn_check_update)
         link = HyperlinkButton("https://github.com/hepengzhi/tangdou-downloader", "GitHub 主页 ↗")
         r4.addWidget(link)
         r4.addStretch(1)
@@ -669,6 +695,16 @@ class MainWindow(FluentWindow):
         setTheme(Theme.DARK if self._dark else Theme.LIGHT)
         setThemeColor("#2f80ed")
         self.setStyleSheet(DATA_QSS_DARK if self._dark else DATA_QSS_LIGHT)
+        self._apply_danger_style()
+
+    def _apply_danger_style(self):
+        """停止按钮危险色（fluent 会覆盖内联样式，需在主题应用后追加）。"""
+        btn = getattr(self, "btn_stop", None)
+        if btn is None:
+            return
+        btn.setStyleSheet(btn.styleSheet() + "\n"
+                          "QPushButton { color: #eb5757; }\n"
+                          "QPushButton:disabled { color: #8a8f98; }")
 
     # ---------------- 自动更新 ----------------
     def start_update_check(self):
@@ -685,7 +721,11 @@ class MainWindow(FluentWindow):
 
     @Slot()
     def check_update_now(self):
+        if self._update_worker and self._update_worker.isRunning():
+            return  # 防连点
         self.log("正在检查更新…")
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("检查中…")
         InfoBar.info("正在检查更新", "请稍候…", parent=self.setting_page,
                      position=InfoBarPosition.TOP_RIGHT, duration=2500)
         self._check_update(manual=True)
@@ -705,6 +745,9 @@ class MainWindow(FluentWindow):
 
     @Slot(bool, str, str, int, str)
     def _on_update_result(self, is_newer, tag, url, size, body, manual=False):
+        if hasattr(self, "btn_check_update"):
+            self.btn_check_update.setEnabled(True)
+            self.btn_check_update.setText("检查更新")
         if not is_newer:
             if manual:
                 InfoBar.success("已是最新版本", f"当前 v{VERSION}", parent=self.setting_page,
@@ -829,6 +872,29 @@ class MainWindow(FluentWindow):
     def _update_task_count(self):
         n = self.table.rowCount()
         self.grp_tasks.setTitle(f"任务列表（共 {n} 项）")
+        # 空态引导随任务数显隐
+        hint = getattr(self, "_empty_hint", None)
+        if hint is not None:
+            hint.setVisible(n == 0)
+            if n == 0:
+                hint.setGeometry(self.table.rect())
+                hint.raise_()
+
+    def _maybe_show_tutorial(self):
+        """首次启动弹一次使用教程。"""
+        if self.settings.value("tutorial_done", "0") == "1":
+            return
+        self.settings.setValue("tutorial_done", "1")
+        box = QMessageBox(self)
+        box.setWindowTitle("三步上手")
+        box.setText(
+            "三步使用：\n\n"
+            "① 手机打开「糖豆」App → 搜索歌名 → 点开视频 → 分享 → 复制链接\n"
+            "② 粘贴到「链接下载」页（可一次粘贴多个），或到「歌名搜索」页按歌名搜\n"
+            "③ 点「加入任务」→「开始下载」，视频(mp4)和音频(mp3)自动保存到下载目录\n\n"
+            "下载过程中最小化到托盘会继续后台运行，完成有系统通知。")
+        box.addButton("知道了", QMessageBox.AcceptRole)
+        box.exec()
 
     def _pick_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择保存目录", self.edit_dir.text())

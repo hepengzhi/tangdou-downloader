@@ -98,5 +98,36 @@ def test_tray_guarded_in_offscreen(app):
     _teardown_window(app, w)
 
 
+def test_empty_hint_toggle(win):
+    """空态引导随任务数显隐。"""
+    app = QApplication.instance()
+    app.processEvents()
+    assert win._empty_hint.isVisible()
+    win._add_row("20000002258422", "任务A")
+    win._update_task_count()
+    app.processEvents()
+    assert not win._empty_hint.isVisible()
+    # 删除该行（clear_done 只删完成/失败行）
+    win.table.selectRow(0)
+    win.delete_selected_tasks()
+    app.processEvents()
+    assert win.table.rowCount() == 0
+    assert win._empty_hint.isVisible()
+
+
+def test_stop_button_danger_color(win):
+    win._apply_danger_style()
+    assert "#eb5757" in win.btn_stop.styleSheet()
+
+
+def test_check_update_anti_double_click(win):
+    """连点检查更新时第二次被忽略（worker 运行中直接返回）。"""
+    assert hasattr(win, "btn_check_update")
+    win.check_update_now()
+    assert not win.btn_check_update.isEnabled()  # 检查期间禁用
+    win.btn_check_update.setEnabled(True)        # 恢复（结果回调会做同样的事）
+    win.btn_check_update.setText("检查更新")
+
+
 def test_version_key():
     assert g.version_key("v1.2.0") == (1, 2, 0)
