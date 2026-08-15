@@ -23,20 +23,27 @@ import webbrowser
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import tangdou_dl as td  # 复用命令行版的下载逻辑
+import tdcore as td  # 核心逻辑包（api/download/search/log）
 
 from PySide6.QtCore import Qt, QThread, QSettings, Signal, Slot
-from PySide6.QtGui import QFont, QColor, QBrush
+from PySide6.QtGui import QFont, QColor, QBrush, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPlainTextEdit, QLineEdit, QPushButton, QLabel, QComboBox, QCheckBox,
     QSpinBox, QFileDialog, QTableWidget, QTableWidgetItem, QProgressBar,
     QListWidget, QAbstractItemView, QMessageBox, QGroupBox, QSplitter,
-    QMenu, QHeaderView,
+    QMenu, QHeaderView, QSystemTrayIcon,
 )
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 REPO = "hepengzhi/tangdou-downloader"
+
+
+def app_icon():
+    """应用图标：打包后从 _MEIPASS/assets 读取，源码运行从项目 assets 读取。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(base, "assets", "icon.ico")
+    return QIcon(p) if os.path.exists(p) else QIcon()
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
 K_VIDEO, K_MP3 = "video", "mp3"
@@ -293,6 +300,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"糖豆广场舞下载器 v{VERSION}")
+        self.setWindowIcon(app_icon())
         self.resize(980, 760)
         self.setMinimumSize(760, 560)
         self._worker = None
@@ -300,13 +308,69 @@ class MainWindow(QMainWindow):
         self._update_worker = None
         self._row_of_key = {}
         self._ok_count = 0
+        self._tray = None
         self.settings = QSettings("TangdouDownloader", "TangdouDownloader")
 
         self._build_ui()
         self._load_settings()
+        self._setup_tray()
         self._update_task_count()
         self.statusBar().showMessage("就绪")
         self._check_update()
+
+    # ---------------- 系统托盘 ----------------
+    def _setup_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self._tray = QSystemTrayIcon(app_icon(), self)
+        self._tray.setToolTip(f"糖豆广场舞下载器 v{VERSION}")
+        menu = QMenu(self)
+        act_show = menu.addAction("显示主窗口")
+        act_show.triggered.connect(self._show_window)
+        menu.addSeparator()
+        act_start = menu.addAction("开始下载")
+        act_start.triggered.connect(self.start_download)
+        act_stop = menu.addAction("停止")
+        act_stop.triggered.connect(self.stop_download)
+        menu.addSeparator()
+        act_quit = menu.addAction("退出")
+        act_quit.triggered.connect(self.quit_app)
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(
+            lambda reason: self._show_window() if reason == QSystemTrayIcon.DoubleClick else None)
+        self._tray.show()
+
+    def _show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _notify(self, title, msg, icon=QSystemTrayIcon.Information):
+        if self._tray:
+            self._tray.showMessage(title, msg, icon, 5000)
+
+    def quit_app(self):
+        self._save_settings()
+        self._wait_background_threads()
+        QApplication.instance().quit()
+
+    def _wait_background_threads(self):
+        """退出前等待后台线程结束，避免 QThread 被销毁时仍在运行。"""
+        for w in (self._update_worker, self._search_worker, self._worker):
+            if w is not None and w.isRunning():
+                w.wait(3000)
+
+    def closeEvent(self, event):
+        """关闭窗口 = 最小化到托盘，下载继续后台运行；真正退出用托盘菜单「退出」。"""
+        self._save_settings()
+        if self._tray is not None:
+            event.ignore()
+            self.hide()
+            self._notify("已最小化到托盘", "下载任务仍在后台继续，点击托盘图标可恢复窗口。",
+                         QSystemTrayIcon.Information)
+        else:
+            self._wait_background_threads()
+            super().closeEvent(event)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -586,6 +650,7 @@ class MainWindow(QMainWindow):
         self.log_view.appendPlainText(text)
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
+        td.get_logger().info(text)
 
     def _update_task_count(self):
         n = self.table.rowCount()
@@ -824,7 +889,9 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         done = self.table.rowCount() - self._fail_count()
-        self.statusBar().showMessage(f"全部任务结束：成功 {self._ok_count} / {done} 个")
+        msg = f"全部任务结束：成功 {self._ok_count} / {done} 个"
+        self.statusBar().showMessage(msg)
+        self._notify("下载完成", msg, QSystemTrayIcon.Information)
 
     def _fail_count(self):
         n = 0
@@ -924,10 +991,13 @@ class MainWindow(QMainWindow):
 
 def main():
     import traceback as _tb
+    td.setup_log_file()
+    _log = td.get_logger()
 
     def _excepthook(exc_type, exc_value, exc_tb):
-        """全局异常兜底：日志区展示，并弹友好提示，不裸奔崩溃。"""
+        """全局异常兜底：日志区展示、落盘，并弹友好提示，不裸奔崩溃。"""
         msg = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
+        _log.error("未处理异常:\n%s", msg)
         app = QApplication.instance()
         if app is not None:
             for w in app.topLevelWidgets():
@@ -936,13 +1006,14 @@ def main():
             QMessageBox.critical(
                 None, "出错了",
                 f"程序遇到未处理的错误：\n{exc_type.__name__}: {exc_value}\n\n"
-                "详情见日志区。如果反复出现，请把日志反馈给开发者。")
+                "详情见日志区或日志文件。如果反复出现，请把日志反馈给开发者。")
         else:
             sys.stderr.write(msg)
 
     sys.excepthook = _excepthook
     app = QApplication(sys.argv)
     app.setApplicationName("糖豆广场舞下载器")
+    app.setWindowIcon(app_icon())
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

@@ -42,7 +42,10 @@
 - ✅ **舞曲 MP3**：直接下载糖豆舞曲原音频，或从视频中提取音轨（ffmpeg）
 - ✅ **设置持久化**：保存目录 / 清晰度 / 音频 / 并发数 / 深色模式 / 窗口大小自动记忆
 - ✅ **深色模式**：🌙/☀️ 一键切换
+- ✅ **系统托盘**：关闭窗口最小化到托盘后台继续下载，完成弹系统通知，托盘菜单快速操作
 - ✅ **自动更新检查**：启动时检测 GitHub Release 新版并提示
+- ✅ **日志落盘**：`%LOCALAPPDATA%\TangdouDownloader\logs\tangdou.log`（滚动日志，便于排障）
+- ✅ **自动化测试**：pytest 单元测试 + GUI 离屏测试，CI 构建前自动运行
 - ✅ **后台任务队列**：GUI 线程下载不卡界面，实时进度条、日志、可停止
 
 ---
@@ -150,11 +153,20 @@ python tangdou_dl.py 20000002258422 --quality h540p --no-audio --dir "D:/广场�
 
 ```
 tangdou-downloader/
-├── tangdou_dl.py      # 命令行版 + 核心下载逻辑（标准库实现）
-├── tangdou_gui.py     # PySide6 图形界面
-├── smoke_gui.py       # GUI 离屏自动化冒烟测试
-├── README.md          # 本文档
-└── LICENSE            # MIT 许可证
+├── tangdou_dl.py          # 命令行入口（门面，逻辑在 tdcore）
+├── tangdou_gui.py         # PySide6 图形界面
+├── tdcore/                # 核心逻辑包
+│   ├── api.py             #   糖豆接口封装（视频信息/清晰度/HTML兜底）
+│   ├── download.py        #   下载核心（断点续传/音频提取/剪辑/批量）
+│   ├── search.py          #   歌名搜索
+│   ├── cli.py             #   命令行参数与主流程
+│   └── log.py             #   日志落盘
+├── tests/                 # pytest 测试套件（单元 + GUI 离屏）
+├── scripts/               # 打包脚本（图标生成、版本信息）
+├── assets/icon.ico        # 应用图标
+├── .github/workflows/     # CI：推 v* 标签自动打包发版
+├── README.md
+└── LICENSE
 ```
 
 ---

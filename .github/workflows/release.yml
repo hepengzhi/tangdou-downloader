@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,7 +24,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 imageio-ffmpeg pyinstaller
+          pip install PySide6 imageio-ffmpeg pyinstaller pytest
+
+      - name: Run tests
+        run: |
+          python -m pytest tests -q
 
       - name: Build exe
         run: |
@@ -31,6 +36,7 @@ jobs:
             --icon assets/icon.ico `
             --version-file scripts/version_info.txt `
             --collect-all imageio_ffmpeg `
+            --add-data "assets;assets" `
             --noconfirm tangdou_gui.py
 
       - name: Verify exe
