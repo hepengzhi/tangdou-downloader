@@ -32,6 +32,7 @@
 
 ## 功能特性
 
+- ✅ **Fluent 风格界面**：基于 PyQt-Fluent-Widgets 的现代侧边导航、卡片与通知（InfoBar），浅色/深色主题一键切换
 - ✅ **按链接 / vid 下载**：粘贴糖豆 App 分享链接或 vid 编号，自动下载视频并提取音频
 - ✅ **会员(VIP)视频**：三通道自动降级解析（主接口 → 老分享接口 → HTML 解析）
 - ✅ **多任务并发下载**：1-4 个并发任务，断点续传（.part），失败一键重试
@@ -55,7 +56,8 @@
 | 依赖 | 说明 |
 |---|---|
 | Python 3.8+ | 必需 |
-| PySide6 | 仅 GUI 需要（`pip install PySide6`） |
+| PySide6 | GUI 需要（`pip install PySide6`） |
+| PySide6-Fluent-Widgets | GUI 需要（Fluent 风格界面，`pip install PySide6-Fluent-Widgets`） |
 | ffmpeg | 音频提取需要；可用 `pip install imageio-ffmpeg` 自动获得 |
 
 > CLI 版仅使用 Python 标准库，无第三方依赖。

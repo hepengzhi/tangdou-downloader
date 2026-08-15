@@ -3,16 +3,17 @@
 """
 糖豆广场舞下载器 - 图形界面 (tangdou_gui.py)
 ============================================
-基于 PySide6 (Qt) 的 GUI：
+基于 PySide6 + PyQt-Fluent-Widgets (qfluentwidgets) 的 Fluent 风格 GUI：
   - 链接/vid 批量下载（视频 + 音频）
   - 歌名搜索（自动搜糖豆站内链接，搜不到引导粘贴 App 分享链接）
   - 相关视频批量下载（同歌其他版本，可仅下舞曲 mp3）
   - 多任务并发下载、断点续传、失败重试
-  - 设置持久化（QSettings）、深色模式、自动更新检查
+  - 设置持久化、深色模式、系统托盘、自动更新检查
 后台线程下载，界面不卡顿；任务表 + 进度条 + 日志。
 
 运行：python tangdou_gui.py
-依赖：pip install PySide6  (音频提取还需 ffmpeg 或 pip install imageio-ffmpeg)
+依赖：pip install PySide6 PySide6-Fluent-Widgets
+      (音频提取还需 ffmpeg 或 pip install imageio-ffmpeg)
 """
 import concurrent.futures
 import json
@@ -25,25 +26,24 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tdcore as td  # 核心逻辑包（api/download/search/log）
 
-from PySide6.QtCore import Qt, QThread, QSettings, QObject, Signal, Slot
-from PySide6.QtGui import QFont, QColor, QBrush, QIcon
+from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, Signal, Slot
+from PySide6.QtGui import QColor, QBrush, QIcon, QAction
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
-    QPlainTextEdit, QLineEdit, QPushButton, QLabel, QComboBox, QCheckBox,
-    QSpinBox, QFileDialog, QTableWidget, QTableWidgetItem, QProgressBar,
-    QListWidget, QAbstractItemView, QMessageBox, QGroupBox, QSplitter,
-    QMenu, QHeaderView, QSystemTrayIcon,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QPlainTextEdit, QFileDialog, QTableWidgetItem, QProgressBar, QListWidgetItem,
+    QAbstractItemView, QMessageBox, QSplitter, QMenu, QSystemTrayIcon, QGroupBox,
+)
+from qfluentwidgets import (
+    FluentWindow, FluentIcon, NavigationItemPosition,
+    BodyLabel, SubtitleLabel, CaptionLabel,
+    LineEdit, SearchLineEdit, ComboBox, SpinBox, SwitchButton,
+    PrimaryPushButton, PushButton, TransparentPushButton,
+    TableWidget, ListWidget, ProgressBar, HyperlinkButton,
+    InfoBar, InfoBarPosition, setTheme, Theme, setThemeColor,
 )
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 REPO = "hepengzhi/tangdou-downloader"
-
-
-def app_icon():
-    """应用图标：打包后从 _MEIPASS/assets 读取，源码运行从项目 assets 读取。"""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    p = os.path.join(base, "assets", "icon.ico")
-    return QIcon(p) if os.path.exists(p) else QIcon()
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
 K_VIDEO, K_MP3 = "video", "mp3"
@@ -56,121 +56,26 @@ STATUS_COLORS = {
     STATUS_FAIL: QColor("#eb5757"),
 }
 
-STYLE_LIGHT = """
-QMainWindow, QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 10pt; }
+# 数据类控件样式（palette 自适应浅/深主题）
+DATA_QSS = """
 QGroupBox {
-    border: 1px solid #d9dee5; border-radius: 8px; margin-top: 10px;
-    background: #fbfcfe; font-weight: bold;
+    border: 1px solid palette(mid); border-radius: 8px; margin-top: 12px;
+    background: palette(window); font-weight: bold;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #344054; }
-QPushButton {
-    background: #ffffff; border: 1px solid #c9d1db; border-radius: 6px;
-    padding: 5px 14px; color: #1f2937;
+QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+QPlainTextEdit {
+    border: 1px solid palette(mid); border-radius: 8px; padding: 6px 8px;
+    background: palette(base); color: palette(text);
+    selection-background-color: rgba(47, 128, 237, 0.35);
 }
-QPushButton:hover { background: #f2f6fc; border-color: #2f80ed; color: #2f80ed; }
-QPushButton:disabled { color: #b0b8c4; background: #f5f6f8; border-color: #e0e4ea; }
-QPushButton#primary {
-    background: #2f80ed; border: 1px solid #2f80ed; color: #ffffff; font-weight: bold;
-}
-QPushButton#primary:hover { background: #1f6fd9; border-color: #1f6fd9; color: #ffffff; }
-QPushButton#primary:disabled { background: #a9c6f0; border-color: #a9c6f0; color: #ffffff; }
-QPushButton#danger { color: #eb5757; }
-QPushButton#danger:hover { border-color: #eb5757; background: #fdf1f1; }
-QPushButton#flat { border: none; background: transparent; color: #4b5563; padding: 4px 8px; }
-QPushButton#flat:hover { background: #eef2f7; color: #2f80ed; }
-QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {
-    border: 1px solid #d0d7e2; border-radius: 6px; padding: 4px 8px; background: #ffffff;
-    selection-background-color: #2f80ed; color: #1f2937;
-}
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus {
-    border-color: #2f80ed;
-}
-QTableWidget {
-    border: 1px solid #d0d7e2; border-radius: 6px; background: #ffffff;
-    gridline-color: #eef1f5; color: #1f2937;
-}
-QTableWidget::item { padding: 4px; }
+QPlainTextEdit:focus { border-color: #2f80ed; }
+QTableWidget, QListWidget { background: palette(base); color: palette(text); }
 QHeaderView::section {
-    background: #f2f5f9; border: none; border-bottom: 1px solid #d0d7e2;
-    padding: 6px 8px; color: #344054; font-weight: bold;
+    background: palette(button); color: palette(text); border: none;
+    border-bottom: 1px solid palette(mid); padding: 6px 8px; font-weight: bold;
 }
-QProgressBar {
-    border: none; border-radius: 5px; background: #e9eef5; height: 12px; text-align: center;
-    font-size: 8pt; color: #1f2937;
-}
-QProgressBar::chunk { border-radius: 5px; background: #2f80ed; }
-QTabWidget::pane { border: 1px solid #d9dee5; border-radius: 8px; background: #ffffff; top: -1px; }
-QTabBar::tab {
-    background: #f2f5f9; border: 1px solid #d9dee5; padding: 7px 18px; margin-right: 2px;
-    border-top-left-radius: 6px; border-top-right-radius: 6px; color: #4b5563;
-}
-QTabBar::tab:selected { background: #ffffff; color: #2f80ed; font-weight: bold; border-bottom-color: #ffffff; }
-QTabBar::tab:hover { color: #2f80ed; }
-QStatusBar { background: #f2f5f9; color: #4b5563; }
-QPlainTextEdit#log { font-family: Consolas, monospace; font-size: 9pt; background: #ffffff; color: #1f2937; }
-QLabel { color: #1f2937; }
-QMenu { background: #ffffff; border: 1px solid #d9dee5; border-radius: 6px; color: #1f2937; }
-QMenu::item:selected { background: #e8f1fd; color: #2f80ed; }
-"""
-
-STYLE_DARK = """
-QMainWindow, QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 10pt; }
-QMainWindow, QDialog, QMessageBox { background: #1e2228; }
-QGroupBox {
-    border: 1px solid #333a44; border-radius: 8px; margin-top: 10px;
-    background: #242a32; font-weight: bold;
-}
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #aeb7c3; }
-QPushButton {
-    background: #2a313b; border: 1px solid #3a434f; border-radius: 6px;
-    padding: 5px 14px; color: #d5dbe3;
-}
-QPushButton:hover { background: #323c49; border-color: #5b9cf5; color: #5b9cf5; }
-QPushButton:disabled { color: #5a636e; background: #262c34; border-color: #2f363f; }
-QPushButton#primary {
-    background: #2f80ed; border: 1px solid #2f80ed; color: #ffffff; font-weight: bold;
-}
-QPushButton#primary:hover { background: #4a93f0; border-color: #4a93f0; color: #ffffff; }
-QPushButton#primary:disabled { background: #3a5a85; border-color: #3a5a85; color: #9db4d4; }
-QPushButton#danger { color: #ef6a6a; }
-QPushButton#danger:hover { border-color: #ef6a6a; background: #3a2a2e; }
-QPushButton#flat { border: none; background: transparent; color: #aeb7c3; padding: 4px 8px; }
-QPushButton#flat:hover { background: #2c333d; color: #5b9cf5; }
-QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {
-    border: 1px solid #3a434f; border-radius: 6px; padding: 4px 8px; background: #1b1f25;
-    selection-background-color: #2f80ed; color: #d5dbe3;
-}
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus {
-    border-color: #5b9cf5;
-}
-QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button { background: #2a313b; }
-QTableWidget {
-    border: 1px solid #3a434f; border-radius: 6px; background: #1b1f25;
-    gridline-color: #2b323b; color: #d5dbe3;
-}
-QTableWidget::item { padding: 4px; }
-QHeaderView::section {
-    background: #242a32; border: none; border-bottom: 1px solid #3a434f;
-    padding: 6px 8px; color: #aeb7c3; font-weight: bold;
-}
-QProgressBar {
-    border: none; border-radius: 5px; background: #2b323b; height: 12px; text-align: center;
-    font-size: 8pt; color: #d5dbe3;
-}
-QProgressBar::chunk { border-radius: 5px; background: #5b9cf5; }
-QTabWidget::pane { border: 1px solid #3a434f; border-radius: 8px; background: #1e2228; top: -1px; }
-QTabBar::tab {
-    background: #242a32; border: 1px solid #3a434f; padding: 7px 18px; margin-right: 2px;
-    border-top-left-radius: 6px; border-top-right-radius: 6px; color: #8a93a0;
-}
-QTabBar::tab:selected { background: #1e2228; color: #5b9cf5; font-weight: bold; border-bottom-color: #1e2228; }
-QTabBar::tab:hover { color: #5b9cf5; }
-QStatusBar { background: #242a32; color: #aeb7c3; }
-QPlainTextEdit#log { font-family: Consolas, monospace; font-size: 9pt; background: #16191e; color: #c9d1da; }
-QLabel { color: #d5dbe3; }
-QMenu { background: #242a32; border: 1px solid #3a434f; border-radius: 6px; color: #d5dbe3; }
-QMenu::item:selected { background: #2f3a48; color: #5b9cf5; }
-QToolTip { background: #242a32; color: #d5dbe3; border: 1px solid #3a434f; }
+QMenu { background: palette(window); color: palette(text); }
+QMenu::item:selected { background: rgba(47, 128, 237, 0.25); }
 """
 
 
@@ -186,6 +91,13 @@ def version_key(tag):
                 break
         nums.append(int(d) if d else 0)
     return tuple(nums)
+
+
+def app_icon():
+    """应用图标：打包后从 _MEIPASS/assets 读取，源码运行从项目 assets 读取。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(base, "assets", "icon.ico")
+    return QIcon(p) if os.path.exists(p) else QIcon()
 
 
 class SearchWorker(QThread):
@@ -207,7 +119,8 @@ class SearchWorker(QThread):
 
 
 class _UpdateSignals(QObject):
-    """更新检查的信号桥（普通线程安全地向主线程发射 Qt 信号）。"""
+    """更新检查的信号桥（普通线程安全地向主线程发射 Qt 信号）。
+    不挂 parent：即使窗口先销毁，线程发射也是安全的（接收方销毁时连接自动断开）。"""
     found = Signal(str, str, str)       # tag, download_url, body
 
 
@@ -217,7 +130,7 @@ class UpdateChecker:
     def __init__(self, repo, current, parent=None):
         self.repo = repo
         self.current = current
-        self.signals = _UpdateSignals(parent) if parent is not None else _UpdateSignals()
+        self.signals = _UpdateSignals()   # 无 parent，独立存活
         self._t = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
@@ -298,7 +211,6 @@ class DownloadWorker(QThread):
         self.task_done.emit(key, ok, mp4 or "", mp3 or "")
 
     def run(self):
-        ok_count = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as ex:
             futures = [ex.submit(self._do_task, *t) for t in self.tasks]
             for f in concurrent.futures.as_completed(futures):
@@ -310,27 +222,291 @@ class DownloadWorker(QThread):
         self.all_done.emit()
 
 
-class MainWindow(QMainWindow):
+class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"糖豆广场舞下载器 v{VERSION}")
         self.setWindowIcon(app_icon())
-        self.resize(980, 760)
-        self.setMinimumSize(760, 560)
+        self.resize(1020, 780)
+        self.setMinimumSize(780, 580)
+
         self._worker = None
         self._search_worker = None
         self._update_worker = None
         self._row_of_key = {}
         self._ok_count = 0
         self._tray = None
+        self._dark = False
         self.settings = QSettings("TangdouDownloader", "TangdouDownloader")
 
-        self._build_ui()
+        self._build_pages()
+        self._build_navigation()
         self._load_settings()
         self._setup_tray()
         self._update_task_count()
-        self.statusBar().showMessage("就绪")
-        self._check_update()
+        self._set_status("就绪")
+
+    # ---------------- 页面构建 ----------------
+    def _build_pages(self):
+        self.link_page = self._page_link()
+        self.link_page.setObjectName("linkPage")
+        self.song_page = self._page_song()
+        self.song_page.setObjectName("songPage")
+        self.related_page = self._page_related()
+        self.related_page.setObjectName("relatedPage")
+        self.setting_page = self._page_setting()
+        self.setting_page.setObjectName("settingPage")
+
+    def _build_navigation(self):
+        self.addSubInterface(self.link_page, FluentIcon.DOWNLOAD, "链接下载")
+        self.addSubInterface(self.song_page, FluentIcon.SEARCH, "歌名搜索")
+        self.addSubInterface(self.related_page, FluentIcon.ALBUM, "相关批量")
+        self.addSubInterface(self.setting_page, FluentIcon.SETTING, "设置",
+                             position=NavigationItemPosition.BOTTOM)
+
+    def _page_link(self):
+        page = QWidget(self)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(20, 16, 20, 12)
+        v.setSpacing(10)
+
+        v.addWidget(SubtitleLabel("链接下载"))
+        v.addWidget(BodyLabel("粘贴糖豆分享链接或 vid 编号（每行一个，可多行）："))
+
+        self.edit_links = QPlainTextEdit()
+        self.edit_links.setPlaceholderText(
+            "https://www.tangdoucdn.com/h5/play?vid=20000002258422&...\n20000002258422\n\n"
+            "提示：糖豆 App 中 视频 → 分享 → 复制链接")
+        self.edit_links.setMinimumHeight(100)
+        v.addWidget(self.edit_links, 1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_clear = TransparentPushButton("清空")
+        btn_clear.clicked.connect(lambda: self.edit_links.clear())
+        row.addWidget(btn_clear)
+        btn_add = PrimaryPushButton("＋ 加入任务")
+        btn_add.clicked.connect(self.add_links)
+        row.addWidget(btn_add)
+        v.addLayout(row)
+
+        # 任务列表 + 日志
+        splitter = QSplitter(Qt.Vertical)
+
+        self.grp_tasks = QGroupBox("任务列表")
+        gv = QVBoxLayout(self.grp_tasks)
+        gv.setContentsMargins(14, 18, 14, 10)
+        gv.setSpacing(6)
+        self.table = TableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["状态", "标题", "进度"])
+        self.table.setColumnWidth(0, 76)
+        self.table.setColumnWidth(2, 190)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(TableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(TableWidget.SelectRows)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_menu)
+        self.table.cellDoubleClicked.connect(self._on_table_double_click)
+        gv.addWidget(self.table)
+
+        row_btns = QHBoxLayout()
+        row_btns.setSpacing(8)
+        self.btn_start = PrimaryPushButton("▶ 开始下载")
+        self.btn_start.clicked.connect(self.start_download)
+        self.btn_stop = PushButton("■ 停止")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self.stop_download)
+        btn_retry = PushButton("重试失败")
+        btn_retry.clicked.connect(self.retry_failed)
+        btn_del = PushButton("删除选中")
+        btn_del.clicked.connect(self.delete_selected_tasks)
+        btn_clear_done = PushButton("清空完成项")
+        btn_clear_done.clicked.connect(self.clear_done)
+        for b in (self.btn_start, self.btn_stop, btn_retry, btn_del, btn_clear_done):
+            row_btns.addWidget(b)
+        row_btns.addStretch(1)
+        gv.addLayout(row_btns)
+        splitter.addWidget(self.grp_tasks)
+
+        grp_log = QGroupBox("日志")
+        lv = QVBoxLayout(grp_log)
+        lv.setContentsMargins(14, 18, 14, 8)
+        lv.setSpacing(6)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(5000)
+        lv.addWidget(self.log_view)
+        lr = QHBoxLayout()
+        lr.addStretch(1)
+        btn_clear_log = TransparentPushButton("清空日志")
+        btn_clear_log.clicked.connect(lambda: self.log_view.clear())
+        lr.addWidget(btn_clear_log)
+        lv.addLayout(lr)
+        splitter.addWidget(grp_log)
+        splitter.setSizes([440, 250])
+
+        v.addWidget(splitter, 3)
+
+        self._status_label = CaptionLabel("")
+        v.addWidget(self._status_label)
+        return page
+
+    def _page_song(self):
+        page = QWidget(self)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        v.addWidget(SubtitleLabel("歌名搜索"))
+
+        row = QHBoxLayout()
+        row.addWidget(BodyLabel("歌名:"))
+        self.edit_song = SearchLineEdit()
+        self.edit_song.setPlaceholderText("例如：最炫民族风")
+        self.edit_song.returnPressed.connect(self.do_search)
+        row.addWidget(self.edit_song, 1)
+        self.btn_search = PrimaryPushButton("搜索")
+        self.btn_search.setMinimumWidth(100)
+        self.btn_search.clicked.connect(self.do_search)
+        row.addWidget(self.btn_search)
+        v.addLayout(row)
+
+        v.addWidget(BodyLabel("搜索结果（🎬 糖豆站内 = 可自动下载；🔗 全网 = 参考链接）："))
+        self.list_results = ListWidget()
+        self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        v.addWidget(self.list_results, 1)
+
+        row2 = QHBoxLayout()
+        row2.addStretch(1)
+        btn_add = PrimaryPushButton("＋ 将选中结果加入任务")
+        btn_add.clicked.connect(self.add_selected_results)
+        row2.addWidget(btn_add)
+        v.addLayout(row2)
+
+        v.addSpacing(6)
+        v.addWidget(BodyLabel("自动搜索无结果时：在糖豆 App 搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到下面："))
+        self.edit_paste = QPlainTextEdit()
+        self.edit_paste.setPlaceholderText("粘贴 App 分享链接，每行一个")
+        self.edit_paste.setMaximumHeight(80)
+        v.addWidget(self.edit_paste)
+        row3 = QHBoxLayout()
+        row3.addStretch(1)
+        btn_paste = PrimaryPushButton("＋ 将粘贴的链接加入任务")
+        btn_paste.clicked.connect(self.add_pasted_links)
+        row3.addWidget(btn_paste)
+        v.addLayout(row3)
+        return page
+
+    def _page_related(self):
+        page = QWidget(self)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        v.addWidget(SubtitleLabel("相关批量"))
+
+        row = QHBoxLayout()
+        row.addWidget(BodyLabel("基准视频 vid:"))
+        self.edit_base_vid = LineEdit()
+        self.edit_base_vid.setPlaceholderText("20000002258422")
+        row.addWidget(self.edit_base_vid, 1)
+        self.check_audio_only = SwitchButton("仅下载舞曲 mp3")
+        row.addWidget(self.check_audio_only)
+        row.addWidget(BodyLabel("数量:"))
+        self.spin_limit = SpinBox()
+        self.spin_limit.setRange(1, 20)
+        self.spin_limit.setValue(20)
+        row.addWidget(self.spin_limit)
+        btn = PrimaryPushButton("＋ 加入任务")
+        btn.clicked.connect(self.add_related)
+        row.addWidget(btn)
+        v.addLayout(row)
+
+        hint = BodyLabel("说明：拉取该视频的 20 个相关推荐（通常是同一首歌的其他版本）逐个加入任务；\n"
+                         "勾选「仅下载舞曲 mp3」则直接下载糖豆舞曲原音频，无需安装 ffmpeg。")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+        v.addStretch(1)
+        return page
+
+    def _page_setting(self):
+        page = QWidget(self)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+        v.addWidget(SubtitleLabel("设置"))
+
+        grp1 = QGroupBox("下载设置")
+        g1 = QVBoxLayout(grp1)
+        g1.setContentsMargins(16, 18, 16, 12)
+        g1.setSpacing(12)
+
+        r1 = QHBoxLayout()
+        r1.addWidget(BodyLabel("保存目录:"))
+        self.edit_dir = LineEdit()
+        self.edit_dir.setText(td.default_download_dir())
+        self.edit_dir.setMinimumWidth(260)
+        r1.addWidget(self.edit_dir, 1)
+        btn_browse = PushButton("浏览…")
+        btn_browse.clicked.connect(self._pick_dir)
+        r1.addWidget(btn_browse)
+        btn_open = PrimaryPushButton("打开目录")
+        btn_open.clicked.connect(self.open_dir)
+        r1.addWidget(btn_open)
+        g1.addLayout(r1)
+
+        r2 = QHBoxLayout()
+        r2.addWidget(BodyLabel("清晰度:"))
+        self.combo_quality = ComboBox()
+        self.combo_quality.addItem("自动（优先 720P）", "auto")
+        self.combo_quality.addItem("720P", "h720p")
+        self.combo_quality.addItem("540P", "h540p")
+        self.combo_quality.addItem("全部清晰度", "all")
+        r2.addWidget(self.combo_quality)
+        r2.addSpacing(24)
+        r2.addWidget(BodyLabel("并发下载:"))
+        self.spin_workers = SpinBox()
+        self.spin_workers.setRange(1, 4)
+        self.spin_workers.setValue(2)
+        r2.addWidget(self.spin_workers)
+        r2.addWidget(CaptionLabel("(糖豆 CDN 限流，建议 1-3)"))
+        r2.addStretch(1)
+        g1.addLayout(r2)
+
+        r3 = QHBoxLayout()
+        self.check_audio = SwitchButton("提取音频 (mp3)")
+        self.check_audio.setOnText("开")
+        self.check_audio.setOffText("关")
+        self.check_audio.setChecked(True)
+        r3.addWidget(self.check_audio)
+        r3.addSpacing(24)
+        self.btn_theme = SwitchButton("深色模式")
+        self.btn_theme.setOnText("深色")
+        self.btn_theme.setOffText("浅色")
+        self.btn_theme.checkedChanged.connect(lambda c: self.set_dark(c))
+        r3.addWidget(self.btn_theme)
+        r3.addStretch(1)
+        g1.addLayout(r3)
+        v.addWidget(grp1)
+
+        grp2 = QGroupBox("关于")
+        g2 = QVBoxLayout(grp2)
+        g2.setContentsMargins(16, 18, 16, 12)
+        g2.setSpacing(10)
+        self._ver_label = BodyLabel(f"糖豆广场舞下载器 v{VERSION}")
+        g2.addWidget(self._ver_label)
+        r4 = QHBoxLayout()
+        btn_update = PrimaryPushButton("检查更新")
+        btn_update.clicked.connect(self.check_update_now)
+        r4.addWidget(btn_update)
+        link = HyperlinkButton("https://github.com/hepengzhi/tangdou-downloader", "GitHub 主页 ↗")
+        r4.addWidget(link)
+        r4.addStretch(1)
+        g2.addLayout(r4)
+        v.addWidget(grp2)
+        v.addStretch(1)
+        return page
 
     # ---------------- 系统托盘 ----------------
     def _setup_tray(self):
@@ -339,16 +515,20 @@ class MainWindow(QMainWindow):
         self._tray = QSystemTrayIcon(app_icon(), self)
         self._tray.setToolTip(f"糖豆广场舞下载器 v{VERSION}")
         menu = QMenu(self)
-        act_show = menu.addAction("显示主窗口")
+        act_show = QAction("显示主窗口", menu)
         act_show.triggered.connect(self._show_window)
+        menu.addAction(act_show)
         menu.addSeparator()
-        act_start = menu.addAction("开始下载")
+        act_start = QAction("开始下载", menu)
         act_start.triggered.connect(self.start_download)
-        act_stop = menu.addAction("停止")
+        menu.addAction(act_start)
+        act_stop = QAction("停止", menu)
         act_stop.triggered.connect(self.stop_download)
+        menu.addAction(act_stop)
         menu.addSeparator()
-        act_quit = menu.addAction("退出")
+        act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self.quit_app)
+        menu.addAction(act_quit)
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(
             lambda reason: self._show_window() if reason == QSystemTrayIcon.DoubleClick else None)
@@ -369,7 +549,6 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def _wait_background_threads(self):
-        """退出前等待后台线程结束，避免 QThread 被销毁时仍在运行。"""
         for w in (self._update_worker, self._search_worker, self._worker):
             if w is not None and w.isRunning():
                 w.wait(3000)
@@ -386,228 +565,7 @@ class MainWindow(QMainWindow):
             self._wait_background_threads()
             super().closeEvent(event)
 
-    # ---------------- UI ----------------
-    def _build_ui(self):
-        central = QWidget(self)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 8)
-        root.setSpacing(8)
-
-        # ---- 设置区 ----
-        cfg_grp = QGroupBox("下载设置")
-        cfg = QHBoxLayout(cfg_grp)
-        cfg.setContentsMargins(12, 14, 12, 10)
-        cfg.setSpacing(8)
-        cfg.addWidget(QLabel("清晰度:"))
-        self.combo_quality = QComboBox()
-        self.combo_quality.addItem("自动（优先 720P）", "auto")
-        self.combo_quality.addItem("720P", "h720p")
-        self.combo_quality.addItem("540P", "h540p")
-        self.combo_quality.addItem("全部清晰度", "all")
-        cfg.addWidget(self.combo_quality)
-        self.check_audio = QCheckBox("提取音频 (mp3)")
-        self.check_audio.setChecked(True)
-        cfg.addWidget(self.check_audio)
-        cfg.addWidget(QLabel("并发:"))
-        self.spin_workers = QSpinBox()
-        self.spin_workers.setRange(1, 4)
-        self.spin_workers.setValue(2)
-        self.spin_workers.setToolTip("同时下载的任务数（糖豆 CDN 限流，建议 1-3）")
-        cfg.addWidget(self.spin_workers)
-        cfg.addSpacing(10)
-        cfg.addWidget(QLabel("保存到:"))
-        self.edit_dir = QLineEdit(td.default_download_dir())
-        self.edit_dir.setMinimumWidth(240)
-        cfg.addWidget(self.edit_dir, 1)
-        btn_dir = QPushButton("浏览…")
-        btn_dir.clicked.connect(self._pick_dir)
-        cfg.addWidget(btn_dir)
-        btn_open = QPushButton("打开目录")
-        btn_open.setObjectName("primary")
-        btn_open.clicked.connect(self.open_dir)
-        cfg.addWidget(btn_open)
-        self.btn_theme = QPushButton("🌙")
-        self.btn_theme.setObjectName("flat")
-        self.btn_theme.setToolTip("切换深色/浅色主题")
-        self.btn_theme.setFixedWidth(36)
-        self.btn_theme.clicked.connect(self.toggle_theme)
-        cfg.addWidget(self.btn_theme)
-        root.addWidget(cfg_grp)
-
-        # ---- 页签 ----
-        tabs = QTabWidget()
-        tabs.addTab(self._tab_links(), "链接下载")
-        tabs.addTab(self._tab_song(), "歌名搜索")
-        tabs.addTab(self._tab_related(), "相关批量")
-        root.addWidget(tabs)
-
-        # ---- 任务列表 + 日志（可拖拽分隔）----
-        splitter = QSplitter(Qt.Vertical)
-
-        grp = QGroupBox()
-        self.grp_tasks = grp
-        v = QVBoxLayout(grp)
-        v.setContentsMargins(10, 14, 10, 10)
-        v.setSpacing(6)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["状态", "标题", "进度"])
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Fixed)
-        self.table.setColumnWidth(0, 76)
-        self.table.setColumnWidth(2, 190)
-        self.table.verticalHeader().setDefaultSectionSize(30)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._on_table_menu)
-        self.table.cellDoubleClicked.connect(self._on_table_double_click)
-        v.addWidget(self.table)
-
-        row_btns = QHBoxLayout()
-        row_btns.setSpacing(8)
-        self.btn_start = QPushButton("▶ 开始下载")
-        self.btn_start.setObjectName("primary")
-        self.btn_start.clicked.connect(self.start_download)
-        self.btn_stop = QPushButton("■ 停止")
-        self.btn_stop.setObjectName("danger")
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self.stop_download)
-        btn_retry = QPushButton("重试失败")
-        btn_retry.clicked.connect(self.retry_failed)
-        btn_del = QPushButton("删除选中")
-        btn_del.clicked.connect(self.delete_selected_tasks)
-        btn_clear = QPushButton("清空完成项")
-        btn_clear.clicked.connect(self.clear_done)
-        for b in (self.btn_start, self.btn_stop, btn_retry, btn_del, btn_clear):
-            row_btns.addWidget(b)
-        row_btns.addStretch(1)
-        v.addLayout(row_btns)
-        splitter.addWidget(grp)
-
-        grp2 = QGroupBox("日志")
-        v2 = QVBoxLayout(grp2)
-        v2.setContentsMargins(10, 14, 10, 8)
-        v2.setSpacing(6)
-        self.log_view = QPlainTextEdit()
-        self.log_view.setObjectName("log")
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(5000)
-        v2.addWidget(self.log_view)
-        log_btns = QHBoxLayout()
-        btn_clear_log = QPushButton("清空日志")
-        btn_clear_log.clicked.connect(lambda: self.log_view.clear())
-        log_btns.addStretch(1)
-        log_btns.addWidget(btn_clear_log)
-        v2.addLayout(log_btns)
-        splitter.addWidget(grp2)
-
-        splitter.setSizes([420, 260])
-        root.addWidget(splitter, 1)
-
-        self.setCentralWidget(central)
-
-    def _tab_links(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(8)
-        v.addWidget(QLabel("粘贴糖豆分享链接或 vid 编号（每行一个，可多行）："))
-        self.edit_links = QPlainTextEdit()
-        self.edit_links.setPlaceholderText(
-            "https://www.tangdoucdn.com/h5/play?vid=20000002258422&...\n20000002258422\n\n"
-            "提示：糖豆 App 中 视频 → 分享 → 复制链接")
-        self.edit_links.setMinimumHeight(120)
-        v.addWidget(self.edit_links, 1)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        btn_clear = QPushButton("清空")
-        btn_clear.clicked.connect(lambda: self.edit_links.clear())
-        row.addWidget(btn_clear)
-        btn_add = QPushButton("＋ 加入任务")
-        btn_add.setObjectName("primary")
-        btn_add.clicked.connect(self.add_links)
-        row.addWidget(btn_add)
-        v.addLayout(row)
-        return w
-
-    def _tab_song(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(8)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("歌名:"))
-        self.edit_song = QLineEdit()
-        self.edit_song.setPlaceholderText("例如：最炫民族风")
-        self.edit_song.returnPressed.connect(self.do_search)
-        row.addWidget(self.edit_song, 1)
-        self.btn_search = QPushButton("搜索")
-        self.btn_search.setObjectName("primary")
-        self.btn_search.setMinimumWidth(90)
-        self.btn_search.clicked.connect(self.do_search)
-        row.addWidget(self.btn_search)
-        v.addLayout(row)
-
-        v.addWidget(QLabel("搜索结果（🎬 糖豆站内 = 可自动下载；🔗 全网 = 参考链接）："))
-        self.list_results = QListWidget()
-        self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        v.addWidget(self.list_results, 1)
-        row2 = QHBoxLayout()
-        row2.addStretch(1)
-        btn_add = QPushButton("＋ 将选中结果加入任务")
-        btn_add.setObjectName("primary")
-        btn_add.clicked.connect(self.add_selected_results)
-        row2.addWidget(btn_add)
-        v.addLayout(row2)
-
-        v.addSpacing(4)
-        v.addWidget(QLabel("自动搜索无结果时：在糖豆 App 搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到下面："))
-        self.edit_paste = QPlainTextEdit()
-        self.edit_paste.setPlaceholderText("粘贴 App 分享链接，每行一个")
-        self.edit_paste.setMaximumHeight(80)
-        v.addWidget(self.edit_paste)
-        row3 = QHBoxLayout()
-        row3.addStretch(1)
-        btn_paste = QPushButton("＋ 将粘贴的链接加入任务")
-        btn_paste.setObjectName("primary")
-        btn_paste.clicked.connect(self.add_pasted_links)
-        row3.addWidget(btn_paste)
-        v.addLayout(row3)
-        return w
-
-    def _tab_related(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(8)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("基准视频 vid:"))
-        self.edit_base_vid = QLineEdit()
-        self.edit_base_vid.setPlaceholderText("20000002258422")
-        row.addWidget(self.edit_base_vid, 1)
-        self.check_audio_only = QCheckBox("仅下载舞曲 mp3")
-        row.addWidget(self.check_audio_only)
-        row.addWidget(QLabel("数量:"))
-        self.spin_limit = QSpinBox()
-        self.spin_limit.setRange(1, 20)
-        self.spin_limit.setValue(20)
-        row.addWidget(self.spin_limit)
-        btn = QPushButton("＋ 加入任务")
-        btn.setObjectName("primary")
-        btn.clicked.connect(self.add_related)
-        row.addWidget(btn)
-        v.addLayout(row)
-        hint = QLabel("说明：拉取该视频的 20 个相关推荐（通常是同一首歌的其他版本）逐个加入任务；\n"
-                      "勾选「仅下载舞曲 mp3」则直接下载糖豆舞曲原音频，无需安装 ffmpeg。")
-        hint.setStyleSheet("color: #6b7280;")
-        v.addWidget(hint)
-        v.addStretch(1)
-        return w
-
-    # ---------------- 设置持久化 ----------------
+    # ---------------- 设置持久化与主题 ----------------
     def _load_settings(self):
         s = self.settings
         self.edit_dir.setText(s.value("save_dir", td.default_download_dir(), str))
@@ -615,6 +573,7 @@ class MainWindow(QMainWindow):
         self.check_audio.setChecked(s.value("audio", True, type=bool))
         self.spin_workers.setValue(int(s.value("workers", 2)))
         self._dark = s.value("dark_mode", "0") == "1"
+        self.btn_theme.setChecked(self._dark)
         geo = s.value("geometry", b"", bytes)
         if geo:
             self.restoreGeometry(geo)
@@ -629,27 +588,43 @@ class MainWindow(QMainWindow):
         s.setValue("dark_mode", "1" if self._dark else "0")
         s.setValue("geometry", self.saveGeometry())
 
-    def closeEvent(self, event):
-        self._save_settings()
-        super().closeEvent(event)
+    def set_dark(self, dark):
+        self._dark = bool(dark)
+        self._apply_theme()
 
     def toggle_theme(self):
         self._dark = not self._dark
+        self.btn_theme.setChecked(self._dark)
         self._apply_theme()
 
     def _apply_theme(self):
-        self.setStyleSheet(STYLE_DARK if self._dark else STYLE_LIGHT)
-        self.btn_theme.setText("☀️" if self._dark else "🌙")
+        setTheme(Theme.DARK if self._dark else Theme.LIGHT)
+        setThemeColor("#2f80ed")
+        self.setStyleSheet(DATA_QSS)
 
     # ---------------- 自动更新 ----------------
+    def start_update_check(self):
+        """启动后延迟自动检查更新（避免与窗口初始化竞争）。"""
+        self._check_update()
+
     def _check_update(self):
+        if self._update_worker and self._update_worker.isRunning():
+            return
         self._update_worker = UpdateChecker(REPO, VERSION, self)
         self._update_worker.signals.found.connect(self._on_update_found)
         self._update_worker.start()
 
+    @Slot()
+    def check_update_now(self):
+        self.log("正在检查更新…")
+        self._check_update()
+        InfoBar.info("已请求检查更新", "若有新版本会弹出提示", parent=self.setting_page,
+                     position=InfoBarPosition.TOP_RIGHT, duration=3000)
+
     @Slot(str, str, str)
     def _on_update_found(self, tag, url, body):
         self.log(f"发现新版本 {tag}（当前 {VERSION}）")
+        self._notify("发现新版本", f"{tag}（当前 {VERSION}）", QSystemTrayIcon.Information)
         box = QMessageBox(self)
         box.setWindowTitle("发现新版本")
         box.setText(f"检测到新版本 <b>{tag}</b>（当前 {VERSION}）\n\n{body[:200]}")
@@ -665,6 +640,15 @@ class MainWindow(QMainWindow):
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
         td.get_logger().info(text)
+
+    def _set_status(self, msg):
+        self._status_label.setText(msg)
+
+    def _toast(self, kind, title, content=None):
+        bar = getattr(InfoBar, kind, None)
+        if bar:
+            bar(title, content or "", isClosable=True, duration=3000,
+                parent=self.link_page, position=InfoBarPosition.TOP_RIGHT)
 
     def _update_task_count(self):
         n = self.table.rowCount()
@@ -690,7 +674,7 @@ class MainWindow(QMainWindow):
         item_title.setData(Qt.UserRole + 3, "")    # 完成后的 mp3 路径
         self.table.setItem(r, 0, item_status)
         self.table.setItem(r, 1, item_title)
-        bar = QProgressBar()
+        bar = ProgressBar()
         bar.setRange(0, 100)
         bar.setValue(0)
         bar.setFormat("等待")
@@ -721,7 +705,11 @@ class MainWindow(QMainWindow):
                 continue
             self._add_row(vid, f"vid {vid}", K_VIDEO)
             added += 1
-        self.statusBar().showMessage(f"已加入 {added} 个任务" if added else "没有识别到有效链接/vid")
+        if added:
+            self._set_status(f"已加入 {added} 个任务")
+            self._toast("success", f"已加入 {added} 个任务")
+        else:
+            self._set_status("没有识别到有效链接/vid")
 
     # ---------------- 按钮动作 ----------------
     @Slot()
@@ -759,21 +747,21 @@ class MainWindow(QMainWindow):
         others_n = len(results) - tangdou_n
         if results:
             for r in results:
-                item = QListWidgetItem()
+                li = QListWidgetItem()
                 if r.get("vid"):
-                    item.setText(f"🎬 糖豆 [{r['vid']}] {r['title']}")
-                    item.setData(Qt.UserRole, r["vid"])
+                    li.setText(f"🎬 糖豆 [{r['vid']}] {r['title']}")
+                    li.setData(Qt.UserRole, r["vid"])
                 else:
-                    item.setText(f"🔗 全网: {r['title']}")
-                    item.setData(Qt.UserRole, None)
-                    item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
-                    item.setToolTip(r.get("url") or "")
-                self.list_results.addItem(item)
+                    li.setText(f"🔗 全网: {r['title']}")
+                    li.setData(Qt.UserRole, None)
+                    li.setFlags(li.flags() & ~Qt.ItemIsSelectable)
+                    li.setToolTip(r.get("url") or "")
+                self.list_results.addItem(li)
             msg = f"糖豆站内 {tangdou_n} 个（可下载）+ 全网参考 {others_n} 条"
-            self.statusBar().showMessage(msg)
+            self._set_status(msg)
             self.log(f"搜索结果：糖豆 {tangdou_n} 条（自动下载），全网参考 {others_n} 条")
         else:
-            self.statusBar().showMessage("全网未搜到该歌名的广场舞视频，请在糖豆 App 搜索后粘贴分享链接")
+            self._set_status("全网未搜到该歌名的广场舞视频，请在糖豆 App 搜索后粘贴分享链接")
             self.log("未搜到结果。糖豆官网搜索已下线，请在糖豆 App 搜索歌名 → 分享 → 复制链接 → 粘贴到下方输入框。")
 
     @Slot()
@@ -792,7 +780,7 @@ class MainWindow(QMainWindow):
             self._add_row(vid, title, K_VIDEO)
             added += 1
         if added:
-            self.statusBar().showMessage(f"已加入 {added} 个糖豆下载任务")
+            self._set_status(f"已加入 {added} 个糖豆下载任务")
         else:
             QMessageBox.information(self, "提示", "请选择 🎬 糖豆 开头的项（全网参考链接不支持自动下载）")
 
@@ -827,7 +815,7 @@ class MainWindow(QMainWindow):
                     self._add_row(vid2, title, K_VIDEO)
                     added += 1
         self.log(f"已加入 {added} 个相关任务" + ("（仅舞曲 mp3）" if audio_only else ""))
-        self.statusBar().showMessage(f"已加入 {added} 个相关任务")
+        self._set_status(f"已加入 {added} 个相关任务")
 
     @Slot()
     def start_download(self):
@@ -864,7 +852,7 @@ class MainWindow(QMainWindow):
         self._worker.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.statusBar().showMessage(f"开始下载 {len(tasks)} 个任务（并发 {self.spin_workers.value()}）…")
+        self._set_status(f"开始下载 {len(tasks)} 个任务（并发 {self.spin_workers.value()}）…")
 
     @Slot(str, str)
     def _on_task_started(self, key, title):
@@ -904,7 +892,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         done = self.table.rowCount() - self._fail_count()
         msg = f"全部任务结束：成功 {self._ok_count} / {done} 个"
-        self.statusBar().showMessage(msg)
+        self._set_status(msg)
         self._notify("下载完成", msg, QSystemTrayIcon.Information)
 
     def _fail_count(self):
@@ -920,17 +908,16 @@ class MainWindow(QMainWindow):
             self._worker.stop()
             self.btn_stop.setEnabled(False)
             self.log("正在停止（已开始的下载会尽快中止，已下载部分保留可续传）…")
-            self.statusBar().showMessage("停止中…")
+            self._set_status("停止中…")
 
     @Slot()
     def retry_failed(self):
-        """把失败/等待/下载中（已停止）的任务重置为等待，重新可下载。"""
         changed = 0
         for r in range(self.table.rowCount()):
             if self.table.item(r, 0).text() in (STATUS_FAIL, STATUS_RUN, STATUS_WAIT):
                 self._set_row_status(r, STATUS_WAIT, "等待", 0)
                 changed += 1
-        self.statusBar().showMessage(f"已重置 {changed} 个任务，可重新开始下载" if changed else "没有可重试的任务")
+        self._set_status(f"已重置 {changed} 个任务，可重新开始下载" if changed else "没有可重试的任务")
 
     @Slot()
     def open_dir(self):
@@ -1030,8 +1017,10 @@ def main():
     app.setWindowIcon(app_icon())
     win = MainWindow()
     win.show()
+    QTimer.singleShot(2500, win.start_update_check)  # 启动后延迟检查更新
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
     main()
+

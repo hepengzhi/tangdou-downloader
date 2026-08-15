@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """GUI 离屏测试（QT_QPA_PLATFORM=offscreen）。"""
+import gc
+
 import pytest
 
 from PySide6.QtWidgets import QApplication
@@ -13,14 +15,24 @@ def app():
     yield a
 
 
+def _teardown_window(app, w):
+    """干净销毁窗口：显式 close + deleteLater + 处理事件 + gc。
+    （qfluentwidgets 全局状态在多窗口循环退出时可能崩溃，需逐步释放）"""
+    w._save_settings()
+    w._wait_background_threads()
+    w.close()
+    w.deleteLater()
+    app.processEvents()
+    gc.collect()
+    w.settings.clear()
+
+
 @pytest.fixture()
 def win(app):
     w = g.MainWindow()
     w.show()
     yield w
-    w._save_settings()
-    w._wait_background_threads()
-    w.settings.clear()
+    _teardown_window(app, w)
 
 
 def test_window_constructs(win):
@@ -79,11 +91,11 @@ def test_retry_failed(win):
     assert win.table.item(r, 0).text() == g.STATUS_WAIT
 
 
-def test_tray_guarded_in_offscreen():
+def test_tray_guarded_in_offscreen(app):
     """离屏环境无系统托盘支持，_tray 应为 None，closeEvent 走正常路径。"""
-    a = QApplication.instance() or QApplication([])
     w = g.MainWindow()
     assert w._tray is None or not g.QSystemTrayIcon.isSystemTrayAvailable()
+    _teardown_window(app, w)
 
 
 def test_version_key():

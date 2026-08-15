@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 imageio-ffmpeg pyinstaller pytest
+          pip install PySide6 PySide6-Fluent-Widgets imageio-ffmpeg pyinstaller pytest
 
       - name: Run tests
         run: |
