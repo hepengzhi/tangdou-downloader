@@ -18,6 +18,7 @@
 import concurrent.futures
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -27,8 +28,8 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tdcore as td  # 核心逻辑包（api/download/search/log）
 
-from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, QEvent, Signal, Slot
-from PySide6.QtGui import QColor, QBrush, QIcon, QAction
+from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, QSize, QEvent, Signal, Slot
+from PySide6.QtGui import QColor, QBrush, QIcon, QAction, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPlainTextEdit, QFileDialog, QTableWidgetItem, QProgressBar, QListWidgetItem,
@@ -46,7 +47,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -155,6 +156,74 @@ class _UpdateSignals(QObject):
     """更新检查的信号桥（普通线程安全地向主线程发射 Qt 信号）。
     不挂 parent：即使窗口先销毁，线程发射也是安全的（接收方销毁时连接自动断开）。"""
     result = Signal(bool, str, str, int, str)  # is_newer, tag, url, size, body
+
+
+class CoverWorker(QThread):
+    """搜索结果封面图加载：bimg.tangdou.com + 磁盘缓存，并发 4。"""
+    cover_ready = Signal(str, QPixmap)   # vid, pixmap
+    cover_fail = Signal(str)             # vid
+
+    def __init__(self, items, parent=None):
+        """items: [(vid, title), ...]"""
+        super().__init__(parent)
+        self.items = items
+
+    def run(self):
+        cache = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                             "TangdouDownloader", "covers")
+        try:
+            os.makedirs(cache, exist_ok=True)
+        except Exception:
+            cache = ""
+        ctx = ssl._create_unverified_context()
+
+        def _load(vid):
+            if cache:
+                p = os.path.join(cache, f"{vid}.jpg")
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    return vid, _pixmap(p)
+                try:
+                    info = td.get_video_info(vid)
+                    cover = (info or {}).get("cover")
+                    if cover:
+                        url = "https://bimg.tangdou.com" + cover
+                        req = urllib.request.Request(
+                            url, headers={"User-Agent": "Mozilla/5.0",
+                                          "Referer": "https://www.tangdoucdn.com/"})
+                        data = urllib.request.urlopen(req, timeout=15, context=ctx).read()
+                        with open(p, "wb") as f:
+                            f.write(data)
+                        return vid, _pixmap(p)
+                except Exception:
+                    pass
+                return vid, None
+            # 无缓存目录时直接尝试下载
+            try:
+                info = td.get_video_info(vid)
+                cover = (info or {}).get("cover")
+                if cover:
+                    url = "https://bimg.tangdou.com" + cover
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0",
+                                      "Referer": "https://www.tangdoucdn.com/"})
+                    data = urllib.request.urlopen(req, timeout=15, context=ctx).read()
+                    pm = QPixmap()
+                    pm.loadFromData(data)
+                    return (vid, pm) if not pm.isNull() else (vid, None)
+            except Exception:
+                pass
+            return vid, None
+
+        def _pixmap(path):
+            pm = QPixmap(path)
+            return pm if not pm.isNull() else None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            for vid, pm in ex.map(_load, [v for v, _ in self.items]):
+                if pm is not None:
+                    self.cover_ready.emit(vid, pm)
+                else:
+                    self.cover_fail.emit(vid)
 
 
 class UpdateChecker:
@@ -400,6 +469,7 @@ class MainWindow(FluentWindow):
             saved_w = int(QSettings("TangdouDownloader", "TangdouDownloader").value("nav_width", 260) or 260)
             self.navigationInterface.apply_width(saved_w)
             self.navigationInterface.setMinimumExpandWidth(700)  # 窄窗口下文字也常显
+            self.navigationInterface.setMenuButtonVisible(False)  # 去掉展开/收起按钮：导航始终展开
         except Exception:
             pass
 
@@ -472,22 +542,33 @@ class MainWindow(FluentWindow):
         row_paste.addWidget(btn_add_paste)
         v.addLayout(row_paste)
 
-        # 搜索结果 + 下载任务区（上下分栏）
+        # 搜索结果 + 下载任务区（任务区默认隐藏，点按钮展开）
         splitter_v = QSplitter(Qt.Vertical)
+        self.splitter_v = splitter_v
 
         top = QWidget()
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
         tl.setSpacing(6)
-        label_results = BodyLabel(
-            "搜索结果（来自本地 vid-title 数据库，双击结果自动加入任务）：")
+        label_results = BodyLabel("搜索结果（本地数据库 · 双击自动加入任务）：")
         label_results.setWordWrap(True)
         tl.addWidget(label_results)
         self.list_results = ListWidget()
+        self.list_results.setViewMode(ListWidget.IconMode)          # 封面图网格（类似 B 站布局）
+        self.list_results.setIconSize(QSize(180, 120))
+        self.list_results.setGridSize(QSize(200, 150))
+        self.list_results.setResizeMode(ListWidget.Adjust)
+        self.list_results.setMovement(ListWidget.Static)
+        self.list_results.setSpacing(6)
+        self.list_results.setWordWrap(True)
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_results.itemDoubleClicked.connect(self._on_result_double_clicked)
         tl.addWidget(self.list_results, 1)
         row2 = QHBoxLayout()
+        self.btn_toggle_tasks = TransparentPushButton("📋 任务 / 日志")
+        self.btn_toggle_tasks.setCheckable(True)
+        self.btn_toggle_tasks.clicked.connect(self._toggle_task_panel)
+        row2.addWidget(self.btn_toggle_tasks)
         row2.addStretch(1)
         btn_add = PrimaryPushButton("＋ 将选中结果加入任务")
         btn_add.clicked.connect(self.add_selected_results)
@@ -495,13 +576,22 @@ class MainWindow(FluentWindow):
         tl.addLayout(row2)
         splitter_v.addWidget(top)
 
-        splitter_v.addWidget(self._build_task_area())
-        splitter_v.setSizes([220, 470])
+        self._task_panel = self._build_task_area()
+        self._task_panel.setVisible(False)   # 默认隐藏，给搜索结果留空间
+        self._task_visible = False
+        splitter_v.addWidget(self._task_panel)
         v.addWidget(splitter_v, 1)
 
         self._status_label = CaptionLabel("")
         v.addWidget(self._status_label)
         return page
+
+    def _toggle_task_panel(self, checked):
+        self._task_visible = bool(checked)
+        self._task_panel.setVisible(checked)
+        if checked:
+            self.splitter_v.setSizes([280, 420])
+        self.btn_toggle_tasks.setText("🕶 隐藏任务" if checked else "📋 任务 / 日志")
 
     def _build_task_area(self):
         """任务列表 + 日志（下载界面），返回垂直 splitter 挂到页面布局里。"""
@@ -537,8 +627,8 @@ class MainWindow(FluentWindow):
         btn_retry.clicked.connect(self.retry_failed)
         btn_del = PushButton("删除选中")
         btn_del.clicked.connect(self.delete_selected_tasks)
-        btn_clear_done = PushButton("清空完成项")
-        btn_clear_done.clicked.connect(self.clear_done)
+        btn_clear_done = PushButton("清空全部")
+        btn_clear_done.clicked.connect(self.clear_all)
         for b in (self.btn_start, self.btn_stop, btn_retry, btn_del, btn_clear_done):
             row_btns.addWidget(b)
         row_btns.addStretch(1)
@@ -608,6 +698,7 @@ class MainWindow(FluentWindow):
         r2.addWidget(BodyLabel("清晰度:"))
         self.combo_quality = ComboBox()
         self.combo_quality.addItem("自动（优先 720P）", userData="auto")
+        self.combo_quality.addItem("最高画质（优先 1080P）", userData="max")
         self.combo_quality.addItem("720P", userData="h720p")
         self.combo_quality.addItem("540P", userData="h540p")
         self.combo_quality.addItem("全部清晰度", userData="all")
@@ -719,7 +810,18 @@ class MainWindow(FluentWindow):
         s = self.settings
         self.edit_dir.setText(s.value("save_dir", td.default_download_dir(), str))
         self.edit_db.setText(s.value("sqlite_db", "", str))
-        self.combo_quality.setCurrentIndex(int(s.value("quality_idx", 0)))
+        # 清晰度：优先按 quality_data，兼容旧版 quality_idx（新版在索引1插入了「最高画质」）
+        qd = s.value("quality_data", "", str)
+        if qd:
+            for i in range(self.combo_quality.count()):
+                if self.combo_quality.itemData(i) == qd:
+                    self.combo_quality.setCurrentIndex(i)
+                    break
+        else:
+            qidx = int(s.value("quality_idx", 0))
+            if qidx > 0:
+                qidx += 1
+            self.combo_quality.setCurrentIndex(min(qidx, self.combo_quality.count() - 1))
         fmt = s.value("fmt", "", str)
         if not fmt:
             fmt = "both" if s.value("audio", True, type=bool) else "mp4"  # 兼容旧版开关
@@ -745,6 +847,7 @@ class MainWindow(FluentWindow):
         s.setValue("save_dir", self.edit_dir.text())
         s.setValue("sqlite_db", self.edit_db.text())
         s.setValue("quality_idx", self.combo_quality.currentIndex())
+        s.setValue("quality_data", self.combo_quality.currentData())
         s.setValue("fmt", self.combo_fmt.currentData())
         s.setValue("workers", self.spin_workers.value())
         s.setValue("dark_mode", "1" if self._dark else "0")
@@ -1002,7 +1105,17 @@ class MainWindow(FluentWindow):
         self.table.setCellWidget(r, 2, bar)
         self._row_of_key[key] = r
         self._update_task_count()
+        self._show_task_panel()   # 加入任务时自动展开任务区
         return r
+
+    def _show_task_panel(self):
+        """任务区展开（默认隐藏）。"""
+        panel = getattr(self, "_task_panel", None)
+        if panel is not None and not panel.isVisible():
+            panel.setVisible(True)
+            self._task_visible = True
+            self.btn_toggle_tasks.setChecked(True)
+            self.btn_toggle_tasks.setText("🕶 隐藏任务")
 
     def _set_row_status(self, r, status, bar_text=None, bar_value=None):
         item = self.table.item(r, 0)
@@ -1050,6 +1163,8 @@ class MainWindow(FluentWindow):
         self.log(f"== 搜索歌名: {kw} ==")
         # 读输入框当前值（用户在设置里填了但没关闭窗口保存时也能立即生效）
         db_path = self.edit_db.text().strip()
+        if db_path:
+            self._save_settings()   # 顺手持久化（含数据库路径），防止异常退出丢失
         self._search_worker = SearchWorker(kw, db_path, self)
         self._search_worker.search_done.connect(self._on_search_done)
         self._search_worker.search_log.connect(self.log)
@@ -1063,17 +1178,35 @@ class MainWindow(FluentWindow):
         if results:
             for r in results:
                 li = QListWidgetItem()
-                li.setText(f"🗄️ [{r['vid']}] {r['title']}")
+                li.setText(f"{r['title']}")
                 li.setData(Qt.UserRole, r["vid"])
                 li.setData(Qt.UserRole + 1, K_VIDEO)
-                li.setToolTip("来自本地 vid-title 数据库，双击加入任务")
+                li.setToolTip(f"vid: {r['vid']}（双击加入任务）")
+                li.setSizeHint(QSize(190, 150))
                 self.list_results.addItem(li)
             msg = f"本地数据库命中 {len(results)} 条（双击加入任务）"
             self._set_status(msg)
             self.log(msg)
+            # 后台加载封面图（bimg.tangdou.com，磁盘缓存）
+            self._cover_worker = CoverWorker([(r["vid"], r["title"]) for r in results], self)
+            self._cover_worker.cover_ready.connect(self._on_cover_ready)
+            self._cover_worker.cover_fail.connect(self._on_cover_fail)
+            self._cover_worker.start()
         else:
             self._set_status("本地数据库未命中，可尝试其他关键词或粘贴分享链接")
             self.log("本地数据库未命中。可在「设置」页检查数据库路径，或粘贴糖豆 App 分享链接。")
+
+    @Slot(str, QPixmap)
+    def _on_cover_ready(self, vid, pixmap):
+        for i in range(self.list_results.count()):
+            it = self.list_results.item(i)
+            if it.data(Qt.UserRole) == vid:
+                it.setIcon(QIcon(pixmap))
+                break
+
+    @Slot(str)
+    def _on_cover_fail(self, vid):
+        pass  # 拿不到封面就保持纯文字条目
 
     @Slot()
     def _on_result_double_clicked(self, item):
@@ -1082,8 +1215,7 @@ class MainWindow(FluentWindow):
         kind = item.data(Qt.UserRole + 1)
         if not key or kind not in (K_VIDEO, K_BILI):
             return
-        text = item.text()
-        title = text.split("] ", 1)[-1] if "] " in text else key
+        title = item.text() or key
         self._add_row(key, title, kind)
         self._set_status(f"已加入任务：{title}")
         self.log(f"双击加入任务：{title}")
@@ -1100,14 +1232,13 @@ class MainWindow(FluentWindow):
             kind = it.data(Qt.UserRole + 1)
             if not key or kind not in (K_VIDEO, K_BILI):
                 continue
-            text = it.text()
-            title = text.split("] ", 1)[-1] if "] " in text else key
+            title = it.text() or key
             self._add_row(key, title, kind)
             added += 1
         if added:
             self._set_status(f"已加入 {added} 个下载任务")
         else:
-            QMessageBox.information(self, "提示", "所选条目无效（请选择 🗄️ 数据库 开头的项）")
+            QMessageBox.information(self, "提示", "所选条目无效（请选择 🗄️ 开头的项）")
 
     @Slot()
     def start_download(self):
@@ -1218,15 +1349,14 @@ class MainWindow(FluentWindow):
         os.startfile(os.path.abspath(d))
 
     @Slot()
-    def clear_done(self):
-        for r in range(self.table.rowCount() - 1, -1, -1):
-            if self.table.item(r, 0).text() in (STATUS_OK, STATUS_FAIL):
-                item = self.table.item(r, 1)
-                key = item.data(Qt.UserRole)
-                if key and key in self._row_of_key:
-                    del self._row_of_key[key]
-                self.table.removeRow(r)
+    def clear_all(self):
+        """清空全部任务（运行中任务的完成回调已有缺行保护）。"""
+        self._row_of_key.clear()
+        self.table.setRowCount(0)
         self._update_task_count()
+        self._set_status("已清空全部任务")
+
+    clear_done = clear_all  # 兼容旧引用
 
     @Slot()
     def delete_selected_tasks(self):

@@ -141,10 +141,19 @@ def get_video_info_share(vid):
 
 
 def _pick_quality_url(play_url, quality):
-    """按 quality(auto/h720p/h540p) 挑选最终播放地址。"""
+    """按 quality(auto/max/h720p/h540p) 挑选最终播放地址。"""
     m = re.search(r"_(H?\d+P|V?\d+P)", play_url)
     base_tag = m.group(1) if m else None
     if quality == "h540p" or base_tag is None:
+        return play_url
+    if quality == "max":
+        # 最高画质：优先 1080P → 720P 逐级尝试（多数视频只有单档或 540P/720P）
+        for q in ("H1080P", "V1080P", "H720P", "V720P"):
+            if q == base_tag:
+                return play_url
+            cand = play_url.replace(base_tag, q)
+            if head_ok(cand):
+                return cand
         return play_url
     if quality == "h720p":
         for q in ("H720P", "V720P", "H1080P"):

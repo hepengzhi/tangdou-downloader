@@ -5,7 +5,7 @@ import gc
 import pytest
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QListView
 
 import tangdou_gui as g
 
@@ -18,14 +18,15 @@ def app():
 
 def _teardown_window(app, w):
     """干净销毁窗口：显式 close + deleteLater + 处理事件 + gc。
-    （qfluentwidgets 全局状态在多窗口循环退出时可能崩溃，需逐步释放）"""
+    （qfluentwidgets 全局状态在多窗口循环退出时可能崩溃，需逐步释放）
+    注意：不再调用 settings.clear() —— 那会清掉用户真实注册表里的配置
+    （sqlite_db 等），导致每次跑测试后应用都要重新配置。"""
     w._save_settings()
     w._wait_background_threads()
     w.close()
     w.deleteLater()
     app.processEvents()
     gc.collect()
-    w.settings.clear()
 
 
 @pytest.fixture()
@@ -150,18 +151,21 @@ def test_db_setting_persist(win):
     win._save_settings()
     win.settings.sync()
     assert win.settings.value("sqlite_db") == r"C:\tmp\videos.db"
+    win.settings.remove("sqlite_db")   # 还原，避免污染真实配置
+    win.settings.sync()
 
 
 def test_search_db_result_marker(win):
-    """数据库结果在列表中以 🗄️ 标记且可下载。"""
+    """数据库结果显示为网格条目且可下载。"""
     win._on_search_done([
         {"title": "最炫民族风", "vid": "2000001", "url": "", "source": "db"},
     ])
     assert win.list_results.count() == 1
     it = win.list_results.item(0)
-    assert it.text().startswith("🗄️")
+    assert it.text() == "最炫民族风"
     assert it.data(Qt.UserRole) == "2000001"
     assert it.data(Qt.UserRole + 1) == g.K_VIDEO
+    assert win.list_results.viewMode() == QListView.IconMode  # 封面网格布局
 
 
 def test_search_worker_db_only(app, monkeypatch):
@@ -230,15 +234,41 @@ def test_fmt_combo_persist(win):
     win._save_settings()
     win.settings.sync()
     assert win.settings.value("fmt") == "mp3"
+    win.settings.remove("fmt")         # 还原
+    win.settings.sync()
 
 
 def test_fmt_migration_old_audio(win):
     """旧版 audio 开关迁移：audio=True→both，audio=False→mp4。"""
-    win.settings.clear()
     win.settings.setValue("audio", False)
+    win.settings.remove("fmt")
     win._load_settings()
     assert win.combo_fmt.currentData() == "mp4"
-    win.settings.clear()
     win.settings.setValue("audio", True)
+    win.settings.remove("fmt")
     win._load_settings()
     assert win.combo_fmt.currentData() == "both"
+    win.settings.remove("audio")       # 还原
+    win.settings.sync()
+
+
+def test_task_panel_toggle(win):
+    """任务区默认隐藏，点按钮后显示，加入任务自动展开。"""
+    assert not win._task_panel.isVisible()
+    win._toggle_task_panel(True)
+    assert win._task_panel.isVisible()
+    assert win.btn_toggle_tasks.text().startswith("🕶")
+    win._toggle_task_panel(False)
+    assert not win._task_panel.isVisible()
+    # 加入任务自动展开
+    win._add_row("20000002258422", "任务A")
+    assert win._task_panel.isVisible()
+
+
+def test_clear_all(win):
+    win._add_row("20000002258422", "任务A")
+    win._add_row("20000013474038", "任务B")
+    win._set_row_status(0, g.STATUS_OK, "100%", 100)
+    win.clear_all()
+    assert win.table.rowCount() == 0
+    assert win.grp_tasks.title() == "任务列表（共 0 项）"
