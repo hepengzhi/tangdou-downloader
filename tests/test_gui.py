@@ -99,23 +99,6 @@ def test_tray_guarded_in_offscreen(app):
     _teardown_window(app, w)
 
 
-def test_empty_hint_toggle(win):
-    """空态引导随任务数显隐。"""
-    app = QApplication.instance()
-    app.processEvents()
-    assert win._empty_hint.isVisible()
-    win._add_row("20000002258422", "任务A")
-    win._update_task_count()
-    app.processEvents()
-    assert not win._empty_hint.isVisible()
-    # 删除该行（clear_done 只删完成/失败行）
-    win.table.selectRow(0)
-    win.delete_selected_tasks()
-    app.processEvents()
-    assert win.table.rowCount() == 0
-    assert win._empty_hint.isVisible()
-
-
 def test_stop_button_danger_color(win):
     win._apply_danger_style()
     assert "#eb5757" in win.btn_stop.styleSheet()
@@ -173,14 +156,47 @@ def test_search_db_result_marker(win):
     """数据库结果在列表中以 🗄️ 标记且可下载。"""
     win._on_search_done([
         {"title": "最炫民族风", "vid": "2000001", "url": "", "source": "db"},
-        {"title": "某 B 站视频", "bvid": "BV1xx", "url": "", "source": "bili"},
     ])
-    assert win.list_results.count() == 2
+    assert win.list_results.count() == 1
     it = win.list_results.item(0)
     assert it.text().startswith("🗄️")
     assert it.data(Qt.UserRole) == "2000001"
     assert it.data(Qt.UserRole + 1) == g.K_VIDEO
-    assert win.list_results.item(1).text().startswith("📺")
+
+
+def test_search_worker_db_only(app, monkeypatch):
+    """搜索只查本地数据库（不再走全网/糖豆/B站）。"""
+    called = []
+
+    def fake_find_vids(db, kw):
+        called.append((db, kw))
+        return [(1500669307167, "火火的姑娘")]
+
+    monkeypatch.setattr(g.td, "find_vids", fake_find_vids)
+    out = []
+    w = g.SearchWorker("火火的姑娘", "C:/v.db")
+    w.search_done.connect(lambda r: out.append(r))
+    w.run()
+    assert called == [("C:/v.db", "火火的姑娘")]
+    assert out[0][0]["source"] == "db"
+    assert out[0][0]["vid"] == "1500669307167"
+
+    # 未配置路径 → 直接空结果
+    out2 = []
+    w2 = g.SearchWorker("火火的姑娘", "")
+    w2.search_done.connect(lambda r: out2.append(r))
+    w2.run()
+    assert out2 == [[]]
+
+
+def test_result_double_click_adds_task(win):
+    """双击搜索结果自动加入任务列表。"""
+    win._on_search_done([
+        {"title": "火火的姑娘", "vid": "1500669307167", "url": "", "source": "db"},
+    ])
+    win._on_result_double_clicked(win.list_results.item(0))
+    assert win.table.rowCount() == 1
+    assert win.table.item(0, 1).text() == "火火的姑娘"
 
 
 def test_search_uses_live_db_path(win, monkeypatch):

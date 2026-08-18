@@ -46,7 +46,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -125,7 +125,7 @@ def app_icon():
 
 
 class SearchWorker(QThread):
-    """歌名搜索线程（全网 + 本地 vid-title 数据库）。"""
+    """歌名搜索线程（仅本地 vid-title 数据库）。"""
     search_done = Signal(list)          # [{vid,title,url,source}]
     search_log = Signal(str)
 
@@ -135,22 +135,19 @@ class SearchWorker(QThread):
         self.db_path = db_path
 
     def run(self):
-        try:
-            results = td.search_all(self.keyword)
-        except Exception as e:
-            self.search_log.emit(f"搜索出错: {e}")
-            results = []
-        # 本地 vid-title 数据库优先匹配（source="db"，界面用 🗄️ 标记）
+        if not self.db_path:
+            self.search_log.emit("未配置本地数据库：请在「设置」页选择 vid-title 数据库文件")
+            self.search_done.emit([])
+            return
         try:
             db_rows = td.find_vids(self.db_path, self.keyword)
-            if db_rows:
-                db_results = [
-                    {"title": t, "vid": str(v), "url": "", "source": "db"}
-                    for v, t in db_rows
-                ]
-                results = db_results + results
-        except Exception:
-            pass
+            results = [
+                {"title": t, "vid": str(v), "url": "", "source": "db"}
+                for v, t in db_rows
+            ]
+        except Exception as e:
+            self.search_log.emit(f"数据库查询出错: {e}")
+            results = []
         self.search_done.emit(results)
 
 
@@ -482,11 +479,12 @@ class MainWindow(FluentWindow):
         tl.setContentsMargins(0, 0, 0, 0)
         tl.setSpacing(6)
         label_results = BodyLabel(
-            "搜索结果（🗄️ 本地库 / 🎬 糖豆 / 📺 B站 = 可自动下载；🔗 全网 = 参考链接）：")
+            "搜索结果（来自本地 vid-title 数据库，双击结果自动加入任务）：")
         label_results.setWordWrap(True)
         tl.addWidget(label_results)
         self.list_results = ListWidget()
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_results.itemDoubleClicked.connect(self._on_result_double_clicked)
         tl.addWidget(self.list_results, 1)
         row2 = QHBoxLayout()
         row2.addStretch(1)
@@ -526,25 +524,6 @@ class MainWindow(FluentWindow):
         self.table.customContextMenuRequested.connect(self._on_table_menu)
         self.table.cellDoubleClicked.connect(self._on_table_double_click)
         gv.addWidget(self.table)
-
-        # 空态引导（任务为 0 时覆盖在表格上）
-        self._empty_hint = QLabel(
-            "暂无任务\n\n"
-            "① 在上方输入歌名 → 搜索 → 选中结果加入任务\n"
-            "② 或粘贴糖豆 App 分享链接 / vid 到输入框\n"
-            "③ 点「开始下载」，视频(mp4)+音频(mp3) 自动保存到下载目录",
-            self.table)
-        self._empty_hint.setAlignment(Qt.AlignCenter)
-        self._empty_hint.setWordWrap(True)
-        self._empty_hint.setStyleSheet(
-            "color: #8a8f98; font-size: 11pt; background: transparent;")
-        _table_resize = self.table.resizeEvent
-
-        def _resize(e):
-            self._empty_hint.setGeometry(self.table.rect())
-            _table_resize(e)
-
-        self.table.resizeEvent = _resize
 
         row_btns = QHBoxLayout()
         row_btns.setSpacing(8)
@@ -948,13 +927,6 @@ class MainWindow(FluentWindow):
     def _update_task_count(self):
         n = self.table.rowCount()
         self.grp_tasks.setTitle(f"任务列表（共 {n} 项）")
-        # 空态引导随任务数显隐
-        hint = getattr(self, "_empty_hint", None)
-        if hint is not None:
-            hint.setVisible(n == 0)
-            if n == 0:
-                hint.setGeometry(self.table.rect())
-                hint.raise_()
 
     def _maybe_show_tutorial(self):
         """首次启动弹一次使用教程。"""
@@ -1075,46 +1047,39 @@ class MainWindow(FluentWindow):
         self.btn_search.setEnabled(True)
         self.btn_search.setText("搜索")
         self.list_results.clear()
-        db_n = sum(1 for r in results if r.get("source") == "db")
-        td_n = sum(1 for r in results if r.get("source") == "tangdou")
-        bili_n = sum(1 for r in results if r.get("source") == "bili")
-        others_n = len(results) - db_n - td_n - bili_n
         if results:
             for r in results:
                 li = QListWidgetItem()
-                src = r.get("source")
-                if src == "db":
-                    li.setText(f"🗄️ 数据库 [{r['vid']}] {r['title']}")
-                    li.setData(Qt.UserRole, r["vid"])
-                    li.setData(Qt.UserRole + 1, K_VIDEO)
-                    li.setToolTip("来自本地 vid-title 数据库，可直接下载")
-                elif src == "tangdou":
-                    li.setText(f"🎬 糖豆 [{r['vid']}] {r['title']}")
-                    li.setData(Qt.UserRole, r["vid"])
-                    li.setData(Qt.UserRole + 1, K_VIDEO)
-                elif src == "bili":
-                    li.setText(f"📺 B站 [{r['bvid']}] {r['title']}")
-                    li.setData(Qt.UserRole, r["bvid"])
-                    li.setData(Qt.UserRole + 1, K_BILI)
-                    li.setToolTip(f"UP主: {r.get('author','')} 播放: {r.get('play','')} 时长: {r.get('duration','')}")
-                else:
-                    li.setText(f"🔗 全网: {r['title']}")
-                    li.setData(Qt.UserRole, None)
-                    li.setFlags(li.flags() & ~Qt.ItemIsSelectable)
-                    li.setToolTip(r.get("url") or "")
+                li.setText(f"🗄️ 数据库 [{r['vid']}] {r['title']}")
+                li.setData(Qt.UserRole, r["vid"])
+                li.setData(Qt.UserRole + 1, K_VIDEO)
+                li.setToolTip("来自本地 vid-title 数据库，双击加入任务")
                 self.list_results.addItem(li)
-            msg = f"可下载：本地库 {db_n} + 糖豆 {td_n} + B站 {bili_n}，全网参考 {others_n} 条"
+            msg = f"本地数据库命中 {len(results)} 条（双击加入任务）"
             self._set_status(msg)
-            self.log(f"搜索结果：本地库 {db_n} + 糖豆 {td_n} + B站 {bili_n}（可下载），全网参考 {others_n} 条")
+            self.log(msg)
         else:
-            self._set_status("未搜到结果，请在糖豆 App 搜索歌名后粘贴分享链接")
-            self.log("未搜到结果。糖豆官网搜索已下线，请在糖豆 App 搜索歌名 → 分享 → 复制链接 → 粘贴到上方输入框。")
+            self._set_status("本地数据库未命中，可尝试其他关键词或粘贴分享链接")
+            self.log("本地数据库未命中。可在「设置」页检查数据库路径，或粘贴糖豆 App 分享链接。")
+
+    @Slot()
+    def _on_result_double_clicked(self, item):
+        """双击搜索结果 → 自动加入任务列表。"""
+        key = item.data(Qt.UserRole)
+        kind = item.data(Qt.UserRole + 1)
+        if not key or kind not in (K_VIDEO, K_BILI):
+            return
+        text = item.text()
+        title = text.split("] ", 1)[-1] if "] " in text else key
+        self._add_row(key, title, kind)
+        self._set_status(f"已加入任务：{title}")
+        self.log(f"双击加入任务：{title}")
 
     @Slot()
     def add_selected_results(self):
         items = self.list_results.selectedItems()
         if not items:
-            QMessageBox.information(self, "提示", "请先在搜索结果里选择可下载的视频（🎬 糖豆 / 📺 B站 项）")
+            QMessageBox.information(self, "提示", "请先在搜索结果里选择条目（或双击单条直接加入）")
             return
         added = 0
         for it in items:
@@ -1127,9 +1092,9 @@ class MainWindow(FluentWindow):
             self._add_row(key, title, kind)
             added += 1
         if added:
-            self._set_status(f"已加入 {added} 个下载任务（糖豆/B站）")
+            self._set_status(f"已加入 {added} 个下载任务")
         else:
-            QMessageBox.information(self, "提示", "请选择 🎬 糖豆 或 📺 B站 开头的项（全网参考链接不支持自动下载）")
+            QMessageBox.information(self, "提示", "所选条目无效（请选择 🗄️ 数据库 开头的项）")
 
     @Slot()
     def start_download(self):
