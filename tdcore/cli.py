@@ -78,7 +78,7 @@ def main():
         if not vid:
             print(f"无法从「{t}」识别 vid，跳过")
             continue
-        download_video(vid, outdir, want_audio, quality, clip=clip)
+        download_video(vid, outdir, want_audio=want_audio, quality=quality, clip=clip)
 
     print(f"\n完成！文件保存在: {os.path.abspath(outdir)}")
 

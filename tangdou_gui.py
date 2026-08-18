@@ -46,7 +46,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -238,11 +238,11 @@ class DownloadWorker(QThread):
     log = Signal(str)
     all_done = Signal()
 
-    def __init__(self, tasks, outdir, want_audio, quality, workers=2, parent=None):
+    def __init__(self, tasks, outdir, fmt, quality, workers=2, parent=None):
         super().__init__(parent)
         self.tasks = tasks
         self.outdir = outdir
-        self.want_audio = want_audio
+        self.fmt = fmt                  # "both" / "mp3" / "mp4"
         self.quality = quality
         self.workers = max(1, min(workers, 4))
         self._stop = threading.Event()
@@ -264,7 +264,8 @@ class DownloadWorker(QThread):
             if kind == K_VIDEO:
                 ok, mp4, mp3 = td.download_video(
                     key, self.outdir,
-                    want_audio=self.want_audio,
+                    want_audio=self.fmt != "mp4",   # 非"仅视频"则提取音频
+                    want_video=self.fmt != "mp3",   # "仅音频"时临时下视频提取后删除
                     quality=self.quality,
                     log=self.log.emit,
                     progress=lambda d, t: self._progress(key, d, t),
@@ -495,7 +496,7 @@ class MainWindow(FluentWindow):
         splitter_v.addWidget(top)
 
         splitter_v.addWidget(self._build_task_area())
-        splitter_v.setSizes([300, 400])
+        splitter_v.setSizes([220, 470])
         v.addWidget(splitter_v, 1)
 
         self._status_label = CaptionLabel("")
@@ -559,7 +560,7 @@ class MainWindow(FluentWindow):
         lr.addWidget(btn_clear_log)
         lv.addLayout(lr)
         splitter.addWidget(grp_log)
-        splitter.setSizes([440, 250])
+        splitter.setSizes([520, 190])
         return splitter
 
     def _page_setting(self):
@@ -606,10 +607,10 @@ class MainWindow(FluentWindow):
         r2 = QHBoxLayout()
         r2.addWidget(BodyLabel("清晰度:"))
         self.combo_quality = ComboBox()
-        self.combo_quality.addItem("自动（优先 720P）", "auto")
-        self.combo_quality.addItem("720P", "h720p")
-        self.combo_quality.addItem("540P", "h540p")
-        self.combo_quality.addItem("全部清晰度", "all")
+        self.combo_quality.addItem("自动（优先 720P）", userData="auto")
+        self.combo_quality.addItem("720P", userData="h720p")
+        self.combo_quality.addItem("540P", userData="h540p")
+        self.combo_quality.addItem("全部清晰度", userData="all")
         r2.addWidget(self.combo_quality)
         r2.addSpacing(24)
         r2.addWidget(BodyLabel("并发下载:"))
@@ -622,11 +623,12 @@ class MainWindow(FluentWindow):
         g1.addLayout(r2)
 
         r3 = QHBoxLayout()
-        self.check_audio = SwitchButton("提取音频 (mp3)")
-        self.check_audio.setOnText("开")
-        self.check_audio.setOffText("关")
-        self.check_audio.setChecked(True)
-        r3.addWidget(self.check_audio)
+        r3.addWidget(BodyLabel("下载格式:"))
+        self.combo_fmt = ComboBox()
+        self.combo_fmt.addItem("MP3 + MP4（视频+音频）", userData="both")
+        self.combo_fmt.addItem("仅 MP3（音频）", userData="mp3")
+        self.combo_fmt.addItem("仅 MP4（视频）", userData="mp4")
+        r3.addWidget(self.combo_fmt)
         r3.addSpacing(24)
         self.btn_theme = SwitchButton("深色模式")
         self.btn_theme.setOnText("深色")
@@ -718,13 +720,24 @@ class MainWindow(FluentWindow):
         self.edit_dir.setText(s.value("save_dir", td.default_download_dir(), str))
         self.edit_db.setText(s.value("sqlite_db", "", str))
         self.combo_quality.setCurrentIndex(int(s.value("quality_idx", 0)))
-        self.check_audio.setChecked(s.value("audio", True, type=bool))
+        fmt = s.value("fmt", "", str)
+        if not fmt:
+            fmt = "both" if s.value("audio", True, type=bool) else "mp4"  # 兼容旧版开关
+        for i in range(self.combo_fmt.count()):
+            if self.combo_fmt.itemData(i) == fmt:
+                self.combo_fmt.setCurrentIndex(i)
+                break
         self.spin_workers.setValue(int(s.value("workers", 2)))
         self._dark = s.value("dark_mode", "0") == "1"
         self.btn_theme.setChecked(self._dark)
         geo = s.value("geometry", b"", bytes)
         if geo:
             self.restoreGeometry(geo)
+        # 状态栏提示数据库配置状态
+        if self.edit_db.text().strip():
+            self._set_status("本地数据库已配置，可直接搜索歌名")
+        else:
+            self._set_status("未配置本地数据库：请到「设置」选择 vid-title 数据库文件")
         self._apply_theme()
 
     def _save_settings(self):
@@ -732,7 +745,7 @@ class MainWindow(FluentWindow):
         s.setValue("save_dir", self.edit_dir.text())
         s.setValue("sqlite_db", self.edit_db.text())
         s.setValue("quality_idx", self.combo_quality.currentIndex())
-        s.setValue("audio", self.check_audio.isChecked())
+        s.setValue("fmt", self.combo_fmt.currentData())
         s.setValue("workers", self.spin_workers.value())
         s.setValue("dark_mode", "1" if self._dark else "0")
         s.setValue("geometry", self.saveGeometry())
@@ -1050,7 +1063,7 @@ class MainWindow(FluentWindow):
         if results:
             for r in results:
                 li = QListWidgetItem()
-                li.setText(f"🗄️ 数据库 [{r['vid']}] {r['title']}")
+                li.setText(f"🗄️ [{r['vid']}] {r['title']}")
                 li.setData(Qt.UserRole, r["vid"])
                 li.setData(Qt.UserRole + 1, K_VIDEO)
                 li.setToolTip("来自本地 vid-title 数据库，双击加入任务")
@@ -1118,7 +1131,7 @@ class MainWindow(FluentWindow):
         self._ok_count = 0
         self._worker = DownloadWorker(
             tasks, outdir,
-            want_audio=self.check_audio.isChecked(),
+            fmt=self.combo_fmt.currentData(),
             quality=self.combo_quality.currentData(),
             workers=self.spin_workers.value(),
             parent=self,

@@ -222,3 +222,23 @@ def test_search_uses_live_db_path(win, monkeypatch):
     win.do_search()
     assert captured["db_path"] == r"C:\tmp\videos.db"
     assert captured["kw"] == "火火的姑娘"
+
+
+def test_fmt_combo_persist(win):
+    """下载格式选择持久化。"""
+    win.combo_fmt.setCurrentIndex(1)   # 仅 MP3
+    win._save_settings()
+    win.settings.sync()
+    assert win.settings.value("fmt") == "mp3"
+
+
+def test_fmt_migration_old_audio(win):
+    """旧版 audio 开关迁移：audio=True→both，audio=False→mp4。"""
+    win.settings.clear()
+    win.settings.setValue("audio", False)
+    win._load_settings()
+    assert win.combo_fmt.currentData() == "mp4"
+    win.settings.clear()
+    win.settings.setValue("audio", True)
+    win._load_settings()
+    assert win.combo_fmt.currentData() == "both"

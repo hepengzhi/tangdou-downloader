@@ -243,3 +243,58 @@ def test_check_db(tmp_path):
     ok3, msg3 = td.check_db("")
     assert not ok3 and "未配置" in msg3
 
+
+# ---------- 下载格式（仅 mp3 / 仅 mp4 / mp3+mp4） ----------
+
+def test_download_video_audio_only(tmp_path, monkeypatch):
+    """仅MP3模式：临时下载视频→提取→删除临时文件，返回 (ok, None, mp3路径)。"""
+    import importlib
+    dl = importlib.import_module("tdcore.download")
+    out = str(tmp_path)
+    monkeypatch.setattr(dl, "get_video_info",
+                        lambda vid: {"title": "测试歌", "play_url": "http://x/a_H720P.mp4"})
+
+    def fake_download(url, dest, **kw):
+        with open(dest, "wb") as f:
+            f.write(b"fake-video")
+        return True
+
+    def fake_extract(ffmpeg, mp4, mp3):
+        with open(mp3, "wb") as f:
+            f.write(b"fake-mp3")
+        return True, "mp3"
+
+    monkeypatch.setattr(dl, "download", fake_download)
+    monkeypatch.setattr(dl, "extract_mp3", fake_extract)
+    monkeypatch.setattr(dl, "find_ffmpeg", lambda: "ffmpeg")
+
+    ok, mp4, mp3 = td.download_video("1500669307167", out,
+                                     want_audio=True, want_video=False)
+    assert ok
+    assert mp4 is None
+    assert mp3 and mp3.endswith(".mp3") and os.path.exists(mp3)
+    assert not [f for f in os.listdir(out) if "_tmp" in f], "临时视频应已删除"
+
+
+def test_download_video_video_only(tmp_path, monkeypatch):
+    """仅MP4模式：不提取音频，返回 (ok, mp4路径, None)。"""
+    import importlib
+    dl = importlib.import_module("tdcore.download")
+    out = str(tmp_path)
+    monkeypatch.setattr(dl, "get_video_info",
+                        lambda vid: {"title": "测试歌", "play_url": "http://x/a_H720P.mp4"})
+
+    def fake_download(url, dest, **kw):
+        with open(dest, "wb") as f:
+            f.write(b"fake-video")
+        return True
+
+    monkeypatch.setattr(dl, "download", fake_download)
+
+    ok, mp4, mp3 = td.download_video("1500669307167", out,
+                                     want_audio=False, want_video=True)
+    assert ok
+    assert mp4 and mp4.endswith(".mp4") and os.path.exists(mp4)
+    assert mp3 is None
+    assert not [f for f in os.listdir(out) if f.endswith(".mp3")]
+

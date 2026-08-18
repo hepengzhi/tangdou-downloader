@@ -62,7 +62,7 @@ for r in td.get_related("20000013474038")[:2]:
 print("6) 并发任务数:", len(tasks))
 outdir = r"C:\Users\Ponche\Documents\github\tangdou-downloader\concurtest"
 os.makedirs(outdir, exist_ok=True)
-worker = g.DownloadWorker(tasks, outdir, want_audio=True, quality="auto", workers=2)
+worker = g.DownloadWorker(tasks, outdir, fmt="both", quality="auto", workers=2)
 results = {}
 worker.task_done.connect(lambda k, ok, a, b: results.update({k: ok}))
 worker.start()

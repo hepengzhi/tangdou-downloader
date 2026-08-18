@@ -118,8 +118,12 @@ def clip_video(ffmpeg, mp4_path, clip_range, log=print):
     return mp4_path
 
 
-def download_video(vid, outdir, want_audio=True, quality="auto", log=print, progress=None, clip=None):
+def download_video(vid, outdir, want_audio=True, want_video=True, quality="auto", log=print, progress=None, clip=None):
     """下载单个视频 + 提取音频。返回 (ok, mp4路径, mp3路径)。
+    模式：
+      want_video=True,  want_audio=True  -> mp4 + mp3（默认）
+      want_video=True,  want_audio=False -> 仅 mp4
+      want_video=False, want_audio=True  -> 仅 mp3（临时下载视频，提取后删除）
     quality: auto(优先720P) / h720p / h540p / all(全部清晰度)
     clip: "开始-结束"（如 00:01:30-00:02:30），下载后剪辑出片段。"""
     info = None
@@ -159,8 +163,8 @@ def download_video(vid, outdir, want_audio=True, quality="auto", log=print, prog
         ok_any = False
         for q, url in qualities.items():
             mp4, mp3 = _download_one(vid, title, url, outdir, want_audio, log, progress,
-                                     suffix="_" + q, clip=clip)
-            if mp4:
+                                     suffix="_" + q, clip=clip, want_video=want_video)
+            if mp4 or mp3:
                 ok_any = True
                 if first is None:
                     first = (mp4, mp3)
@@ -169,14 +173,21 @@ def download_video(vid, outdir, want_audio=True, quality="auto", log=print, prog
     play_url = _pick_quality_url(play_url, quality)
     qm = re.search(r"_(H?\d+P|V?\d+P)", play_url)
     log(f"    清晰度: {qm.group(1) if qm else '?'}")
-    mp4, mp3 = _download_one(vid, title, play_url, outdir, want_audio, log, progress, clip=clip)
-    return bool(mp4), mp4, mp3
+    mp4, mp3 = _download_one(vid, title, play_url, outdir, want_audio, log, progress,
+                             clip=clip, want_video=want_video)
+    return bool(mp4 or mp3), mp4, mp3
 
 
-def _download_one(vid, title, play_url, outdir, want_audio, log, progress, suffix="", clip=None):
-    """下载一个具体地址的视频 + 提取音频。返回 (mp4路径, mp3路径)。"""
-    mp4 = os.path.join(outdir, title + suffix + ".mp4")
-    if os.path.exists(mp4) and os.path.getsize(mp4) > 0:
+def _download_one(vid, title, play_url, outdir, want_audio, log, progress, suffix="", clip=None, want_video=True):
+    """下载一个具体地址的视频 + 提取音频。返回 (mp4路径, mp3路径)。
+    want_video=False：仅需音频，视频下到 _tmp.mp4，提取后删除。"""
+    mp3 = os.path.join(outdir, title + suffix + ".mp3")
+    if want_audio and os.path.exists(mp3) and os.path.getsize(mp3) > 0:
+        log("    音频已存在，跳过")
+        return None, mp3
+
+    mp4 = os.path.join(outdir, title + suffix + (".mp4" if want_video else "_tmp.mp4"))
+    if want_video and os.path.exists(mp4) and os.path.getsize(mp4) > 0:
         log("    视频已存在，跳过下载")
     else:
         log(f"    下载视频 -> {os.path.basename(mp4)}")
@@ -184,7 +195,7 @@ def _download_one(vid, title, play_url, outdir, want_audio, log, progress, suffi
             log("    ! 视频下载失败")
             return None, None
 
-    if clip:
+    if clip and want_video:
         ffmpeg = find_ffmpeg()
         if ffmpeg:
             clipped = clip_video(ffmpeg, mp4, clip, log=log)
@@ -193,7 +204,6 @@ def _download_one(vid, title, play_url, outdir, want_audio, log, progress, suffi
         else:
             log("    ! 未找到 ffmpeg，跳过剪辑")
 
-    mp3 = os.path.join(outdir, title + suffix + ".mp3")
     if want_audio:
         if os.path.exists(mp3) and os.path.getsize(mp3) > 0:
             log("    音频已存在，跳过")
@@ -207,7 +217,16 @@ def _download_one(vid, title, play_url, outdir, want_audio, log, progress, suffi
                     log(f"    音频已提取 ({kind})")
                 else:
                     log(f"    ! 音频提取失败: {kind}")
-    return mp4, mp3
+
+    if not want_video:
+        # 仅音频模式：删掉临时视频
+        try:
+            os.remove(mp4)
+            log("    临时视频已删除")
+        except OSError:
+            pass
+        return None, mp3
+    return mp4, (mp3 if want_audio else None)
 
 
 def download_related(vid, outdir, audio_only=False, limit=20, log=print, progress=None):

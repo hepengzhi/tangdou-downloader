@@ -137,7 +137,7 @@ def song_mode(keyword, outdir, want_audio, quality, log=print, clip=None):
             chosen = [downloadables[int(choice) - 1]]
         for r in chosen:
             if r.get("source") == "tangdou":
-                download_video(r["vid"], outdir, want_audio, quality, log=log, clip=clip)
+                download_video(r["vid"], outdir, want_audio=want_audio, quality=quality, log=log, clip=clip)
             else:
                 from .bilibili import download_video_bili
                 download_video_bili(r["bvid"], outdir, log=log)
@@ -154,7 +154,7 @@ def song_mode(keyword, outdir, want_audio, quality, log=print, clip=None):
                     break
                 vid = extract_vid(line)
                 if vid:
-                    download_video(vid, outdir, want_audio, quality, log=log, clip=clip)
+                    download_video(vid, outdir, want_audio=want_audio, quality=quality, log=log, clip=clip)
                 else:
                     log("  无法识别，请确认是糖豆的分享链接或 vid 编号")
         except EOFError:
