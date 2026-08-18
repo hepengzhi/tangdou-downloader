@@ -4,6 +4,7 @@ import gc
 
 import pytest
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 import tangdou_gui as g
@@ -153,3 +154,30 @@ def test_nav_drag_resize_persists(win):
     nav._save_width()
     win.settings.sync()
     assert int(win.settings.value("nav_width")) == 340
+
+
+def test_nav_pages_after_merge(win):
+    """合并后导航只剩「歌名搜索 + 设置」两页。"""
+    keys = set(win.navigationInterface.panel.items.keys())
+    assert keys == {"songPage", "settingPage"}
+
+
+def test_db_setting_persist(win):
+    win.edit_db.setText(r"C:\tmp\videos.db")
+    win._save_settings()
+    win.settings.sync()
+    assert win.settings.value("sqlite_db") == r"C:\tmp\videos.db"
+
+
+def test_search_db_result_marker(win):
+    """数据库结果在列表中以 🗄️ 标记且可下载。"""
+    win._on_search_done([
+        {"title": "最炫民族风", "vid": "2000001", "url": "", "source": "db"},
+        {"title": "某 B 站视频", "bvid": "BV1xx", "url": "", "source": "bili"},
+    ])
+    assert win.list_results.count() == 2
+    it = win.list_results.item(0)
+    assert it.text().startswith("🗄️")
+    assert it.data(Qt.UserRole) == "2000001"
+    assert it.data(Qt.UserRole + 1) == g.K_VIDEO
+    assert win.list_results.item(1).text().startswith("📺")

@@ -46,7 +46,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -125,13 +125,14 @@ def app_icon():
 
 
 class SearchWorker(QThread):
-    """歌名搜索线程。"""
-    search_done = Signal(list)          # [{vid,title,url}]
+    """歌名搜索线程（全网 + 本地 vid-title 数据库）。"""
+    search_done = Signal(list)          # [{vid,title,url,source}]
     search_log = Signal(str)
 
-    def __init__(self, keyword, parent=None):
+    def __init__(self, keyword, db_path="", parent=None):
         super().__init__(parent)
         self.keyword = keyword
+        self.db_path = db_path
 
     def run(self):
         try:
@@ -139,6 +140,17 @@ class SearchWorker(QThread):
         except Exception as e:
             self.search_log.emit(f"搜索出错: {e}")
             results = []
+        # 本地 vid-title 数据库优先匹配（source="db"，界面用 🗄️ 标记）
+        try:
+            db_rows = td.find_vids(self.db_path, self.keyword)
+            if db_rows:
+                db_results = [
+                    {"title": t, "vid": str(v), "url": "", "source": "db"}
+                    for v, t in db_rows
+                ]
+                results = db_results + results
+        except Exception:
+            pass
         self.search_done.emit(results)
 
 
@@ -417,49 +429,83 @@ class MainWindow(FluentWindow):
 
     # ---------------- 页面构建 ----------------
     def _build_pages(self):
-        self.link_page = self._page_link()
-        self.link_page.setObjectName("linkPage")
         self.song_page = self._page_song()
         self.song_page.setObjectName("songPage")
-        self.related_page = self._page_related()
-        self.related_page.setObjectName("relatedPage")
         self.setting_page = self._page_setting()
         self.setting_page.setObjectName("settingPage")
 
     def _build_navigation(self):
-        self.addSubInterface(self.link_page, FluentIcon.DOWNLOAD, "链接下载")
         self.addSubInterface(self.song_page, FluentIcon.SEARCH, "歌名搜索")
-        self.addSubInterface(self.related_page, FluentIcon.ALBUM, "相关批量")
         self.addSubInterface(self.setting_page, FluentIcon.SETTING, "设置",
                              position=NavigationItemPosition.BOTTOM)
 
-    def _page_link(self):
+    def _page_song(self):
+        """歌名搜索页：搜索（含本地 vid 数据库）+ 粘贴链接 + 下载任务区。"""
         page = QWidget(self)
         v = QVBoxLayout(page)
         v.setContentsMargins(20, 16, 20, 12)
-        v.setSpacing(10)
+        v.setSpacing(8)
+        v.addWidget(SubtitleLabel("歌名搜索"))
 
-        v.addWidget(SubtitleLabel("链接下载"))
-        v.addWidget(BodyLabel("粘贴糖豆分享链接或 vid 编号（每行一个，可多行）："))
-
-        self.edit_links = QPlainTextEdit()
-        self.edit_links.setPlaceholderText(
-            "https://www.tangdoucdn.com/h5/play?vid=20000002258422&...\n20000002258422\n\n"
-            "提示：糖豆 App 中 视频 → 分享 → 复制链接")
-        self.edit_links.setMinimumHeight(100)
-        v.addWidget(self.edit_links, 1)
-
+        # 搜索行
         row = QHBoxLayout()
-        row.addStretch(1)
-        btn_clear = TransparentPushButton("清空")
-        btn_clear.clicked.connect(lambda: self.edit_links.clear())
-        row.addWidget(btn_clear)
-        btn_add = PrimaryPushButton("＋ 加入任务")
-        btn_add.clicked.connect(self.add_links)
-        row.addWidget(btn_add)
+        row.setSpacing(8)
+        row.addWidget(BodyLabel("歌名:"))
+        self.edit_song = SearchLineEdit()
+        self.edit_song.setPlaceholderText("例如：最炫民族风")
+        self.edit_song.returnPressed.connect(self.do_search)
+        row.addWidget(self.edit_song, 1)
+        self.btn_search = PrimaryPushButton("搜索")
+        self.btn_search.setMinimumWidth(100)
+        self.btn_search.clicked.connect(self.do_search)
+        row.addWidget(self.btn_search)
         v.addLayout(row)
 
-        # 任务列表 + 日志
+        # 粘贴兜底（紧凑一行）
+        row_paste = QHBoxLayout()
+        row_paste.setSpacing(8)
+        row_paste.addWidget(BodyLabel("粘贴链接:"))
+        self.edit_links = QPlainTextEdit()
+        self.edit_links.setPlaceholderText("糖豆 App 分享链接 / vid，每行一个（自动搜索无结果时用）")
+        self.edit_links.setMaximumHeight(52)
+        row_paste.addWidget(self.edit_links, 1)
+        btn_add_paste = PrimaryPushButton("＋ 加入任务")
+        btn_add_paste.clicked.connect(self.add_links)
+        row_paste.addWidget(btn_add_paste)
+        v.addLayout(row_paste)
+
+        # 搜索结果 + 下载任务区（上下分栏）
+        splitter_v = QSplitter(Qt.Vertical)
+
+        top = QWidget()
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(6)
+        label_results = BodyLabel(
+            "搜索结果（🗄️ 本地库 / 🎬 糖豆 / 📺 B站 = 可自动下载；🔗 全网 = 参考链接）：")
+        label_results.setWordWrap(True)
+        tl.addWidget(label_results)
+        self.list_results = ListWidget()
+        self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        tl.addWidget(self.list_results, 1)
+        row2 = QHBoxLayout()
+        row2.addStretch(1)
+        btn_add = PrimaryPushButton("＋ 将选中结果加入任务")
+        btn_add.clicked.connect(self.add_selected_results)
+        row2.addWidget(btn_add)
+        tl.addLayout(row2)
+        splitter_v.addWidget(top)
+
+        splitter_v.addWidget(self._build_task_area())
+        splitter_v.setSizes([300, 400])
+        v.addWidget(splitter_v, 1)
+
+        self._status_label = CaptionLabel("")
+        v.addWidget(self._status_label)
+        return page
+
+    def _build_task_area(self):
+        """任务列表 + 日志（下载界面），返回垂直 splitter 挂到页面布局里。"""
         splitter = QSplitter(Qt.Vertical)
 
         self.grp_tasks = QGroupBox("任务列表")
@@ -484,9 +530,9 @@ class MainWindow(FluentWindow):
         # 空态引导（任务为 0 时覆盖在表格上）
         self._empty_hint = QLabel(
             "暂无任务\n\n"
-            "① 在「链接下载」页粘贴糖豆分享链接 / vid\n"
-            "② 或去「歌名搜索」按歌名找视频\n"
-            "③ 手机糖豆 App：搜歌名 → 分享 → 复制链接，粘贴即可",
+            "① 在上方输入歌名 → 搜索 → 选中结果加入任务\n"
+            "② 或粘贴糖豆 App 分享链接 / vid 到输入框\n"
+            "③ 点「开始下载」，视频(mp4)+音频(mp3) 自动保存到下载目录",
             self.table)
         self._empty_hint.setAlignment(Qt.AlignCenter)
         self._empty_hint.setWordWrap(True)
@@ -535,93 +581,7 @@ class MainWindow(FluentWindow):
         lv.addLayout(lr)
         splitter.addWidget(grp_log)
         splitter.setSizes([440, 250])
-
-        v.addWidget(splitter, 3)
-
-        self._status_label = CaptionLabel("")
-        v.addWidget(self._status_label)
-        return page
-
-    def _page_song(self):
-        page = QWidget(self)
-        v = QVBoxLayout(page)
-        v.setContentsMargins(20, 16, 20, 16)
-        v.setSpacing(10)
-        v.addWidget(SubtitleLabel("歌名搜索"))
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(BodyLabel("歌名:"))
-        self.edit_song = SearchLineEdit()
-        self.edit_song.setPlaceholderText("例如：最炫民族风")
-        self.edit_song.returnPressed.connect(self.do_search)
-        row.addWidget(self.edit_song, 1)
-        self.btn_search = PrimaryPushButton("搜索")
-        self.btn_search.setMinimumWidth(100)
-        self.btn_search.clicked.connect(self.do_search)
-        row.addWidget(self.btn_search)
-        v.addLayout(row)
-
-        label_results = BodyLabel("搜索结果（🎬 糖豆 / 📺 B站 = 可自动下载；🔗 全网 = 参考链接）：")
-        label_results.setWordWrap(True)
-        v.addWidget(label_results)
-        self.list_results = ListWidget()
-        self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        v.addWidget(self.list_results, 1)
-
-        row2 = QHBoxLayout()
-        row2.addStretch(1)
-        btn_add = PrimaryPushButton("＋ 将选中结果加入任务")
-        btn_add.clicked.connect(self.add_selected_results)
-        row2.addWidget(btn_add)
-        v.addLayout(row2)
-
-        v.addSpacing(6)
-        label_paste_hint = BodyLabel("自动搜索无结果时：在糖豆 App 搜索歌名 → 点开视频 → 分享 → 复制链接，粘贴到下面：")
-        label_paste_hint.setWordWrap(True)
-        v.addWidget(label_paste_hint)
-        self.edit_paste = QPlainTextEdit()
-        self.edit_paste.setPlaceholderText("粘贴 App 分享链接，每行一个")
-        self.edit_paste.setMaximumHeight(80)
-        v.addWidget(self.edit_paste)
-        row3 = QHBoxLayout()
-        row3.addStretch(1)
-        btn_paste = PrimaryPushButton("＋ 将粘贴的链接加入任务")
-        btn_paste.clicked.connect(self.add_pasted_links)
-        row3.addWidget(btn_paste)
-        v.addLayout(row3)
-        return page
-
-    def _page_related(self):
-        page = QWidget(self)
-        v = QVBoxLayout(page)
-        v.setContentsMargins(20, 16, 20, 16)
-        v.setSpacing(10)
-        v.addWidget(SubtitleLabel("相关批量"))
-
-        row = QHBoxLayout()
-        row.addWidget(BodyLabel("基准视频 vid:"))
-        self.edit_base_vid = LineEdit()
-        self.edit_base_vid.setPlaceholderText("20000002258422")
-        row.addWidget(self.edit_base_vid, 1)
-        self.check_audio_only = SwitchButton("仅下载舞曲 mp3")
-        row.addWidget(self.check_audio_only)
-        row.addWidget(BodyLabel("数量:"))
-        self.spin_limit = SpinBox()
-        self.spin_limit.setRange(1, 20)
-        self.spin_limit.setValue(20)
-        row.addWidget(self.spin_limit)
-        btn = PrimaryPushButton("＋ 加入任务")
-        btn.clicked.connect(self.add_related)
-        row.addWidget(btn)
-        v.addLayout(row)
-
-        hint = BodyLabel("说明：拉取该视频的 20 个相关推荐（通常是同一首歌的其他版本）逐个加入任务；\n"
-                         "勾选「仅下载舞曲 mp3」则直接下载糖豆舞曲原音频，无需安装 ffmpeg。")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
-        v.addStretch(1)
-        return page
+        return splitter
 
     def _page_setting(self):
         page = QWidget(self)
@@ -648,6 +608,20 @@ class MainWindow(FluentWindow):
         btn_open.clicked.connect(self.open_dir)
         r1.addWidget(btn_open)
         g1.addLayout(r1)
+
+        r_db = QHBoxLayout()
+        r_db.addWidget(BodyLabel("数据库(.db):"))
+        self.edit_db = LineEdit()
+        self.edit_db.setPlaceholderText("vid-title 对应表 sqlite 文件（可选，搜索歌名时查 vid）")
+        self.edit_db.setMinimumWidth(260)
+        r_db.addWidget(self.edit_db, 1)
+        btn_browse_db = PushButton("浏览…")
+        btn_browse_db.clicked.connect(self._pick_db)
+        r_db.addWidget(btn_browse_db)
+        btn_test_db = PushButton("测试")
+        btn_test_db.clicked.connect(self._test_db)
+        r_db.addWidget(btn_test_db)
+        g1.addLayout(r_db)
 
         r2 = QHBoxLayout()
         r2.addWidget(BodyLabel("清晰度:"))
@@ -762,6 +736,7 @@ class MainWindow(FluentWindow):
     def _load_settings(self):
         s = self.settings
         self.edit_dir.setText(s.value("save_dir", td.default_download_dir(), str))
+        self.edit_db.setText(s.value("sqlite_db", "", str))
         self.combo_quality.setCurrentIndex(int(s.value("quality_idx", 0)))
         self.check_audio.setChecked(s.value("audio", True, type=bool))
         self.spin_workers.setValue(int(s.value("workers", 2)))
@@ -775,6 +750,7 @@ class MainWindow(FluentWindow):
     def _save_settings(self):
         s = self.settings
         s.setValue("save_dir", self.edit_dir.text())
+        s.setValue("sqlite_db", self.edit_db.text())
         s.setValue("quality_idx", self.combo_quality.currentIndex())
         s.setValue("audio", self.check_audio.isChecked())
         s.setValue("workers", self.spin_workers.value())
@@ -906,7 +882,7 @@ class MainWindow(FluentWindow):
     def _on_dl_done(self, dlg, dest, ok, err):
         if not ok:
             self.log(f"更新下载失败: {err}")
-            InfoBar.error("更新失败", err or "未知错误", parent=self.link_page,
+            InfoBar.error("更新失败", err or "未知错误", parent=self.setting_page,
                           position=InfoBarPosition.TOP_RIGHT, duration=5000)
             dlg.reject()
             return
@@ -947,9 +923,9 @@ class MainWindow(FluentWindow):
             shutil.move(new_exe, dst)
             os.startfile(os.path.dirname(dst))
             InfoBar.success("更新已下载", f"已保存到 {dst}\n（源码运行版无法自动替换，请手动替换后重启）",
-                            parent=self.link_page, position=InfoBarPosition.TOP_RIGHT, duration=6000)
+                            parent=self.setting_page, position=InfoBarPosition.TOP_RIGHT, duration=6000)
         except Exception as e:
-            InfoBar.error("保存失败", str(e), parent=self.link_page,
+            InfoBar.error("保存失败", str(e), parent=self.setting_page,
                           position=InfoBarPosition.TOP_RIGHT, duration=5000)
 
     # ---------------- 工具方法 ----------------
@@ -966,7 +942,7 @@ class MainWindow(FluentWindow):
         bar = getattr(InfoBar, kind, None)
         if bar:
             bar(title, content or "", isClosable=True, duration=3000,
-                parent=self.link_page, position=InfoBarPosition.TOP_RIGHT)
+                parent=self.setting_page, position=InfoBarPosition.TOP_RIGHT)
 
     def _update_task_count(self):
         n = self.table.rowCount()
@@ -989,7 +965,8 @@ class MainWindow(FluentWindow):
         box.setText(
             "三步使用：\n\n"
             "① 手机打开「糖豆」App → 搜索歌名 → 点开视频 → 分享 → 复制链接\n"
-            "② 粘贴到「链接下载」页（可一次粘贴多个），或到「歌名搜索」页按歌名搜\n"
+            "② 在「歌名搜索」页输入歌名搜索（可选配本地 vid-title 数据库，命中结果显示 🗄️），"
+            "或直接粘贴分享链接\n"
             "③ 点「加入任务」→「开始下载」，视频(mp4)和音频(mp3)自动保存到下载目录\n\n"
             "下载过程中最小化到托盘会继续后台运行，完成有系统通知。")
         box.addButton("知道了", QMessageBox.AcceptRole)
@@ -999,6 +976,22 @@ class MainWindow(FluentWindow):
         d = QFileDialog.getExistingDirectory(self, "选择保存目录", self.edit_dir.text())
         if d:
             self.edit_dir.setText(d)
+
+    def _pick_db(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "选择 vid-title 数据库", "",
+            "SQLite 数据库 (*.db *.sqlite *.sqlite3);;所有文件 (*)")
+        if f:
+            self.edit_db.setText(f)
+
+    def _test_db(self):
+        ok, msg = td.check_db(self.edit_db.text())
+        if ok:
+            InfoBar.success("数据库可用", msg, parent=self.setting_page,
+                            position=InfoBarPosition.TOP_RIGHT, duration=3000)
+        else:
+            InfoBar.error("数据库不可用", msg, parent=self.setting_page,
+                          position=InfoBarPosition.TOP_RIGHT, duration=4000)
 
     def _add_row(self, key, title, kind=K_VIDEO):
         if key in self._row_of_key:
@@ -1060,12 +1053,6 @@ class MainWindow(FluentWindow):
             self.edit_links.clear()
 
     @Slot()
-    def add_pasted_links(self):
-        self._enqueue_links(self.edit_paste.toPlainText())
-        if self.edit_paste.toPlainText().strip():
-            self.edit_paste.clear()
-
-    @Slot()
     def do_search(self):
         kw = self.edit_song.text().strip()
         if not kw:
@@ -1074,7 +1061,8 @@ class MainWindow(FluentWindow):
         self.btn_search.setEnabled(False)
         self.btn_search.setText("搜索中…")
         self.log(f"== 搜索歌名: {kw} ==")
-        self._search_worker = SearchWorker(kw, self)
+        db_path = self.settings.value("sqlite_db", "", str)
+        self._search_worker = SearchWorker(kw, db_path, self)
         self._search_worker.search_done.connect(self._on_search_done)
         self._search_worker.search_log.connect(self.log)
         self._search_worker.start()
@@ -1084,14 +1072,20 @@ class MainWindow(FluentWindow):
         self.btn_search.setEnabled(True)
         self.btn_search.setText("搜索")
         self.list_results.clear()
+        db_n = sum(1 for r in results if r.get("source") == "db")
         td_n = sum(1 for r in results if r.get("source") == "tangdou")
         bili_n = sum(1 for r in results if r.get("source") == "bili")
-        others_n = len(results) - td_n - bili_n
+        others_n = len(results) - db_n - td_n - bili_n
         if results:
             for r in results:
                 li = QListWidgetItem()
                 src = r.get("source")
-                if src == "tangdou":
+                if src == "db":
+                    li.setText(f"🗄️ 数据库 [{r['vid']}] {r['title']}")
+                    li.setData(Qt.UserRole, r["vid"])
+                    li.setData(Qt.UserRole + 1, K_VIDEO)
+                    li.setToolTip("来自本地 vid-title 数据库，可直接下载")
+                elif src == "tangdou":
                     li.setText(f"🎬 糖豆 [{r['vid']}] {r['title']}")
                     li.setData(Qt.UserRole, r["vid"])
                     li.setData(Qt.UserRole + 1, K_VIDEO)
@@ -1106,12 +1100,12 @@ class MainWindow(FluentWindow):
                     li.setFlags(li.flags() & ~Qt.ItemIsSelectable)
                     li.setToolTip(r.get("url") or "")
                 self.list_results.addItem(li)
-            msg = f"可下载：糖豆 {td_n} + B站 {bili_n}，全网参考 {others_n} 条"
+            msg = f"可下载：本地库 {db_n} + 糖豆 {td_n} + B站 {bili_n}，全网参考 {others_n} 条"
             self._set_status(msg)
-            self.log(f"搜索结果：糖豆 {td_n} + B站 {bili_n}（可下载），全网参考 {others_n} 条")
+            self.log(f"搜索结果：本地库 {db_n} + 糖豆 {td_n} + B站 {bili_n}（可下载），全网参考 {others_n} 条")
         else:
             self._set_status("未搜到结果，请在糖豆 App 搜索歌名后粘贴分享链接")
-            self.log("未搜到结果。糖豆官网搜索已下线，请在糖豆 App 搜索歌名 → 分享 → 复制链接 → 粘贴到下方输入框。")
+            self.log("未搜到结果。糖豆官网搜索已下线，请在糖豆 App 搜索歌名 → 分享 → 复制链接 → 粘贴到上方输入框。")
 
     @Slot()
     def add_selected_results(self):
@@ -1133,39 +1127,6 @@ class MainWindow(FluentWindow):
             self._set_status(f"已加入 {added} 个下载任务（糖豆/B站）")
         else:
             QMessageBox.information(self, "提示", "请选择 🎬 糖豆 或 📺 B站 开头的项（全网参考链接不支持自动下载）")
-
-    @Slot()
-    def add_related(self):
-        vid = td.extract_vid(self.edit_base_vid.text())
-        if not vid:
-            QMessageBox.information(self, "提示", "请输入有效的基准视频 vid")
-            return
-        self.log(f"== 拉取 {vid} 的相关视频 ==")
-        try:
-            items = td.get_related(vid)
-        except Exception as e:
-            QMessageBox.warning(self, "出错", f"获取相关视频失败: {e}")
-            return
-        if not items:
-            QMessageBox.information(self, "提示", "该视频没有相关推荐")
-            return
-        audio_only = self.check_audio_only.isChecked()
-        limit = self.spin_limit.value()
-        added = 0
-        for it in items[:limit]:
-            title = td.sanitize(it.get("title") or "")
-            if audio_only:
-                mp3url = it.get("mp3url")
-                if mp3url:
-                    self._add_row(mp3url, "🎵 " + title, K_MP3)
-                    added += 1
-            else:
-                vid2 = str(it.get("vid") or "")
-                if vid2:
-                    self._add_row(vid2, title, K_VIDEO)
-                    added += 1
-        self.log(f"已加入 {added} 个相关任务" + ("（仅舞曲 mp3）" if audio_only else ""))
-        self._set_status(f"已加入 {added} 个相关任务")
 
     @Slot()
     def start_download(self):

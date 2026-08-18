@@ -200,3 +200,46 @@ def test_version_key_in_gui():
     assert version_key("v1.10.0") > version_key("v1.9.0")
     assert version_key("v1.0.2") < version_key("v1.2.0")
 
+
+# ---------- 本地 vid-title 数据库 ----------
+
+def _make_video_db(path):
+    import sqlite3
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE videos (vid INTEGER PRIMARY KEY, title TEXT)")
+    con.executemany(
+        "INSERT INTO videos (vid, title) VALUES (?, ?)",
+        [(2000001, "最炫民族风"), (2000002, "最炫民族风 广场舞"), (2000003, "小苹果")])
+    con.commit()
+    con.close()
+
+
+def test_find_vids(tmp_path):
+    db = str(tmp_path / "videos.db")
+    _make_video_db(db)
+    assert td.find_vids(db, "民族风") == [
+        (2000001, "最炫民族风"), (2000002, "最炫民族风 广场舞")]
+    assert td.find_vids(db, "小苹果") == [(2000003, "小苹果")]
+    assert td.find_vids(db, "不存在的歌") == []
+    assert td.find_vids("", "民族风") == []
+    assert td.find_vids(str(tmp_path / "missing.db"), "民族风") == []
+    # 标题里的 % / _ 不应被当作 LIKE 通配符
+    assert td.find_vids(db, "100%") == []
+
+
+def test_find_vids_bad_db(tmp_path):
+    bad = tmp_path / "bad.db"
+    bad.write_text("not a sqlite file", encoding="utf-8")
+    assert td.find_vids(str(bad), "民族风") == []
+
+
+def test_check_db(tmp_path):
+    db = str(tmp_path / "videos.db")
+    _make_video_db(db)
+    ok, msg = td.check_db(db)
+    assert ok and "3 条" in msg
+    ok2, _ = td.check_db(str(tmp_path / "missing.db"))
+    assert not ok2
+    ok3, msg3 = td.check_db("")
+    assert not ok3 and "未配置" in msg3
+
