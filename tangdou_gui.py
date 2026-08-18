@@ -46,7 +46,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -614,6 +614,7 @@ class MainWindow(FluentWindow):
         self.edit_db = LineEdit()
         self.edit_db.setPlaceholderText("vid-title 对应表 sqlite 文件（可选，搜索歌名时查 vid）")
         self.edit_db.setMinimumWidth(260)
+        self.edit_db.editingFinished.connect(self._save_settings)  # 手动输入失焦即保存
         r_db.addWidget(self.edit_db, 1)
         btn_browse_db = PushButton("浏览…")
         btn_browse_db.clicked.connect(self._pick_db)
@@ -983,6 +984,7 @@ class MainWindow(FluentWindow):
             "SQLite 数据库 (*.db *.sqlite *.sqlite3);;所有文件 (*)")
         if f:
             self.edit_db.setText(f)
+            self._save_settings()  # 立即持久化，避免忘记关闭窗口导致丢失
 
     def _test_db(self):
         ok, msg = td.check_db(self.edit_db.text())
@@ -1061,7 +1063,8 @@ class MainWindow(FluentWindow):
         self.btn_search.setEnabled(False)
         self.btn_search.setText("搜索中…")
         self.log(f"== 搜索歌名: {kw} ==")
-        db_path = self.settings.value("sqlite_db", "", str)
+        # 读输入框当前值（用户在设置里填了但没关闭窗口保存时也能立即生效）
+        db_path = self.edit_db.text().strip()
         self._search_worker = SearchWorker(kw, db_path, self)
         self._search_worker.search_done.connect(self._on_search_done)
         self._search_worker.search_log.connect(self.log)

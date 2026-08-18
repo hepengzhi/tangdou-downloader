@@ -181,3 +181,28 @@ def test_search_db_result_marker(win):
     assert it.data(Qt.UserRole) == "2000001"
     assert it.data(Qt.UserRole + 1) == g.K_VIDEO
     assert win.list_results.item(1).text().startswith("📺")
+
+
+def test_search_uses_live_db_path(win, monkeypatch):
+    """回归：设置里刚填的路径（未关窗保存）搜索时必须立即生效。"""
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, kw, db_path, parent=None):
+            captured["kw"] = kw
+            captured["db_path"] = db_path
+            self.search_done = type("S", (), {"connect": lambda self, f: None})()
+            self.search_log = type("S", (), {"connect": lambda self, f: None})()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(g, "SearchWorker", FakeWorker)
+    win.edit_db.setText(r"C:\tmp\videos.db")   # 只填输入框，不保存
+    win.edit_song.setText("火火的姑娘")
+    win.do_search()
+    assert captured["db_path"] == r"C:\tmp\videos.db"
+    assert captured["kw"] == "火火的姑娘"
