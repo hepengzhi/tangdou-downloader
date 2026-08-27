@@ -9,6 +9,10 @@ from PySide6.QtWidgets import QApplication, QListView
 
 import tangdou_gui as g
 
+# 关键：让测试写入独立的配置作用域，绝不污染用户的真实注册表设置
+g.SETTINGS_ORG = "TangdouDownloaderTest"
+g.SETTINGS_APP = "TangdouDownloaderTest"
+
 
 @pytest.fixture(scope="module")
 def app():

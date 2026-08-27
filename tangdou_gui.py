@@ -51,9 +51,17 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.11.1"
+VERSION = "1.11.2"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
+
+# 设置作用域：测试可通过覆盖 SETTINGS_APP 把配置写入独立作用域，避免污染真实设置
+SETTINGS_ORG = "TangdouDownloader"
+SETTINGS_APP = "TangdouDownloader"
+
+
+def new_settings():
+    return QSettings(SETTINGS_ORG, SETTINGS_APP)
 
 STATUS_WAIT, STATUS_RUN, STATUS_OK, STATUS_FAIL = "等待", "下载中", "完成", "失败"
 K_VIDEO, K_MP3, K_BILI = "video", "mp3", "bili"
@@ -407,7 +415,7 @@ class ResizableNavigation(NavigationInterface):
 
     def _save_width(self):
         try:
-            QSettings("TangdouDownloader", "TangdouDownloader").setValue("nav_width", self.current_width())
+            new_settings().setValue("nav_width", self.current_width())
         except Exception:
             pass
 
@@ -551,7 +559,7 @@ class MainWindow(FluentWindow):
         self.setMinimumSize(920, 640)
         # 导航栏：展开态默认 260px（不再挡住右侧界面），并支持拖拽右侧边缘调宽
         try:
-            saved_w = int(QSettings("TangdouDownloader", "TangdouDownloader").value("nav_width", 260) or 260)
+            saved_w = int(new_settings().value("nav_width", 260) or 260)
             self.navigationInterface.apply_width(saved_w)
             self.navigationInterface.setMinimumExpandWidth(700)  # 窄窗口下文字也常显
             self.navigationInterface.setMenuButtonVisible(False)  # 去掉展开/收起按钮：导航始终展开
@@ -565,7 +573,7 @@ class MainWindow(FluentWindow):
         self._ok_count = 0
         self._tray = None
         self._dark = False
-        self.settings = QSettings("TangdouDownloader", "TangdouDownloader")
+        self.settings = new_settings()
 
         self._build_pages()
         self._build_navigation()
