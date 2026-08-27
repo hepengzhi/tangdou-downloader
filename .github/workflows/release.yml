@@ -36,6 +36,8 @@ jobs:
             --icon assets/icon.ico `
             --version-file scripts/version_info.txt `
             --collect-all imageio_ffmpeg `
+            --collect-all PySide6.QtMultimedia `
+            --collect-all PySide6.QtMultimediaWidgets `
             --add-data "assets;assets" `
             --noconfirm tangdou_gui.py
 

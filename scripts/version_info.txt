@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 11, 0, 0),
-    prodvers=(1, 11, 0, 0),
+    filevers=(1, 11, 1, 0),
+    prodvers=(1, 11, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'hepengzhi'),
             StringStruct(u'FileDescription', u'糖豆广场舞下载器：给歌名/链接自动下载视频+音频'),
-            StringStruct(u'FileVersion', u'1.11.0'),
+            StringStruct(u'FileVersion', u'1.11.1'),
             StringStruct(u'InternalName', u'TangdouDownloader'),
             StringStruct(u'LegalCopyright', u'Copyright (c) 2026 hepengzhi'),
             StringStruct(u'OriginalFilename', u'TangdouDownloader.exe'),
             StringStruct(u'ProductName', u'糖豆广场舞下载器'),
-            StringStruct(u'ProductVersion', u'1.11.0')
+            StringStruct(u'ProductVersion', u'1.11.1')
           ]
         )
       ]
