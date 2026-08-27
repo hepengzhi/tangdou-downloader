@@ -37,6 +37,7 @@ from .search import (  # noqa: F401
 from .db import (  # noqa: F401
     find_vids,
     check_db,
+    split_keywords,
 )
 from . import bilibili  # noqa: F401
 from . import updater  # noqa: F401
@@ -49,6 +50,6 @@ __all__ = [
     "get_related", "get_video_info_share", "_pick_quality_url", "http_get_json",
     "download", "extract_mp3", "clip_video", "download_video", "download_related",
     "sogou_search", "song_mode", "search_all", "bilibili", "updater",
-    "find_vids", "check_db",
+    "find_vids", "check_db", "split_keywords",
     "get_logger", "setup_log_file",
 ]

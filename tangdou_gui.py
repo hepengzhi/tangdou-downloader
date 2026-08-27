@@ -23,13 +23,17 @@ import subprocess
 import sys
 import threading
 import webbrowser
+import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tdcore as td  # 核心逻辑包（api/download/search/log）
 
-from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, QSize, QEvent, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QSettings, QObject, QTimer, QSize, QEvent, QPoint, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QBrush, QIcon, QAction, QPixmap
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPlainTextEdit, QFileDialog, QTableWidgetItem, QProgressBar, QListWidgetItem,
@@ -47,7 +51,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation.navigation_interface import NavigationInterface
 from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 REPO = "hepengzhi/tangdou-downloader"
 version_key = td.updater.version_key  # 供测试/兼容引用
 
@@ -450,6 +454,87 @@ class ResizableNavigation(NavigationInterface):
         return super().eventFilter(obj, e)
 
 
+class _PreviewHandler(BaseHTTPRequestHandler):
+    """本地流代理：给 Qt 播放器提供可带 Referer 的 tangdou mp4 流。"""
+
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        u = q.get("u", [None])[0]
+        if not u:
+            self.send_response(400)
+            self.end_headers()
+            return
+        # 剥掉代理自身的 Host/Connection/Accept-Encoding 等头，避免污染上游请求
+        _DROP = {"host", "connection", "proxy-connection", "accept-encoding",
+                 "proxy-authorization"}
+        hdrs = {k: v for k, v in self.headers.items() if k.strip().lower() not in _DROP}
+        hdrs["Referer"] = "https://www.tangdoucdn.com/"
+        hdrs["User-Agent"] = "Mozilla/5.0"
+        req = urllib.request.Request(u, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=30,
+                                        context=ssl._create_unverified_context()) as resp:
+                self.send_response(resp.status)
+                self.send_header("Content-Type", resp.headers.get("Content-Type") or "video/mp4")
+                self.send_header("Accept-Ranges", resp.headers.get("Accept-Ranges") or "bytes")
+                for k in ("Content-Length", "Content-Range", "Content-Disposition"):
+                    if resp.headers.get(k):
+                        self.send_header(k, resp.headers[k])
+                self.end_headers()
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except Exception:
+            try:
+                self.send_response(502)
+                self.end_headers()
+            except Exception:
+                pass
+
+    def log_message(self, *a):
+        pass
+
+
+class PreviewProxy:
+    """单例：本地 HTTP 代理，供 QMediaPlayer 预览糖豆视频（补 Referer + 转发 Range）。"""
+
+    _inst = None
+
+    def __init__(self):
+        self._server = None
+        self._port = 0
+
+    @classmethod
+    def instance(cls):
+        if cls._inst is None:
+            cls._inst = cls()
+            cls._inst._start()
+        return cls._inst
+
+    def _start(self):
+        try:
+            self._server = HTTPServer(("127.0.0.1", 0), _PreviewHandler)
+            self._port = self._server.server_address[1]
+            threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        except Exception:
+            self._port = 0
+
+    def url(self, play_url):
+        return f"http://127.0.0.1:{self._port}/stream?u={urllib.parse.quote(play_url)}"
+
+    def stop(self):
+        if self._server:
+            try:
+                self._server.shutdown()
+                self._server.server_close()
+            except Exception:
+                pass
+            self._server = None
+            self._port = 0
+
+
 class MainWindow(FluentWindow):
     def __init__(self):
         # 用可拖动调宽的导航栏替换默认导航栏（须在 super().__init__ 之前注入）
@@ -550,7 +635,7 @@ class MainWindow(FluentWindow):
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
         tl.setSpacing(6)
-        label_results = BodyLabel("搜索结果（本地数据库 · 双击自动加入任务）：")
+        label_results = BodyLabel("搜索结果（本地数据库 · 支持多关键词搜索 · 双击加任务 / ▶ 预览播放）：")
         label_results.setWordWrap(True)
         tl.addWidget(label_results)
         self.list_results = ListWidget()
@@ -563,6 +648,8 @@ class MainWindow(FluentWindow):
         self.list_results.setWordWrap(True)
         self.list_results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_results.itemDoubleClicked.connect(self._on_result_double_clicked)
+        self.list_results.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_results.customContextMenuRequested.connect(self._on_results_menu)
         tl.addWidget(self.list_results, 1)
         row2 = QHBoxLayout()
         self.btn_toggle_tasks = TransparentPushButton("📋 任务 / 日志")
@@ -570,6 +657,9 @@ class MainWindow(FluentWindow):
         self.btn_toggle_tasks.clicked.connect(self._toggle_task_panel)
         row2.addWidget(self.btn_toggle_tasks)
         row2.addStretch(1)
+        btn_preview = PushButton("▶ 预览选中")
+        btn_preview.clicked.connect(self.preview_selected)
+        row2.addWidget(btn_preview)
         btn_add = PrimaryPushButton("＋ 将选中结果加入任务")
         btn_add.clicked.connect(self.add_selected_results)
         row2.addWidget(btn_add)
@@ -1219,6 +1309,75 @@ class MainWindow(FluentWindow):
         self._add_row(key, title, kind)
         self._set_status(f"已加入任务：{title}")
         self.log(f"双击加入任务：{title}")
+
+    # ---------------- 预览播放 ----------------
+    @Slot(QPoint)
+    def _on_results_menu(self, pos):
+        item = self.list_results.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(self)
+        act_preview = menu.addAction("▶ 预览播放")
+        act_add = menu.addAction("＋ 加入任务")
+        act = menu.exec(self.list_results.viewport().mapToGlobal(pos))
+        if act == act_preview:
+            self._preview_video(item.data(Qt.UserRole), item.text() or "视频")
+        elif act == act_add:
+            self.list_results.setCurrentItem(item)
+            self._on_result_double_clicked(item)
+
+    @Slot()
+    def preview_selected(self):
+        items = self.list_results.selectedItems()
+        if not items:
+            QMessageBox.information(self, "提示", "请先在搜索结果里选择要预览的条目")
+            return
+        it = items[0]
+        self._preview_video(it.data(Qt.UserRole), it.text() or "视频")
+
+    def _preview_video(self, vid, title):
+        """用 Qt 播放器 + 本地流代理预览视频。"""
+        if not vid:
+            return
+        try:
+            info = td.get_video_info(vid)
+            play_url = (info or {}).get("play_url")
+            if not play_url:
+                play_url = td.get_video_url_html(vid)
+            if not play_url:
+                QMessageBox.information(self, "预览", "无法获取该视频的播放地址")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "预览", f"获取播放地址失败：{e}")
+            return
+        proxy = PreviewProxy.instance()
+        if proxy._port == 0:
+            QMessageBox.warning(self, "预览", "本地预览代理启动失败")
+            return
+
+        from PySide6.QtWidgets import QDialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"▶ 预览：{title}")
+        dlg.resize(680, 440)
+        lay = QVBoxLayout(dlg)
+        vw = QVideoWidget()
+        lay.addWidget(vw, 1)
+        player = QMediaPlayer(dlg)
+        audio = QAudioOutput(dlg)
+        player.setAudioOutput(audio)
+        player.setVideoOutput(vw)
+        player.setSource(QUrl(proxy.url(play_url)))
+        player.play()
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_close = PushButton("关闭")
+        btn_close.clicked.connect(lambda: (player.stop(), dlg.accept()))
+        row.addWidget(btn_close)
+        lay.addLayout(row)
+        self._preview_player = player  # 持有引用避免被回收
+        dlg.exec()
+        player.stop()
+        dlg.deleteLater()
 
     @Slot()
     def add_selected_results(self):

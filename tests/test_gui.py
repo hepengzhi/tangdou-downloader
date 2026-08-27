@@ -272,3 +272,10 @@ def test_clear_all(win):
     win.clear_all()
     assert win.table.rowCount() == 0
     assert win.grp_tasks.title() == "任务列表（共 0 项）"
+
+
+def test_preview_button_and_menu(win):
+    """预览按钮/右键菜单存在，方法可调用。"""
+    assert hasattr(win, "preview_selected")
+    assert hasattr(win, "_preview_video")
+    assert hasattr(win, "_on_results_menu")

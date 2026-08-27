@@ -227,6 +227,20 @@ def test_find_vids(tmp_path):
     assert td.find_vids(db, "100%") == []
 
 
+def test_find_vids_multi_keyword(tmp_path):
+    """多关键词（空格/+/、分隔，AND 匹配）。"""
+    db = str(tmp_path / "videos.db")
+    _make_video_db(db)
+    assert td.split_keywords("一瓶+一条大河") == ["一瓶", "一条大河"]
+    assert td.split_keywords(" 民族风   广场舞 ") == ["民族风", "广场舞"]
+    assert td.split_keywords("一条大河、我的祖国") == ["一条大河", "我的祖国"]
+    # AND：只有同时含「民族风」和「广场舞」的条目命中
+    assert td.find_vids(db, "民族风 广场舞") == [(2000002, "最炫民族风 广场舞")]
+    assert td.find_vids(db, "民族风+广场舞") == [(2000002, "最炫民族风 广场舞")]
+    # 只含一个词的不会命中（AND 语义）
+    assert td.find_vids(db, "民族风 小苹果") == []
+
+
 def test_find_vids_bad_db(tmp_path):
     bad = tmp_path / "bad.db"
     bad.write_text("not a sqlite file", encoding="utf-8")
